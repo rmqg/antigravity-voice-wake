@@ -221,6 +221,26 @@ def list_projects() -> list[dict[str, str]]:
     return items
 
 
+def resolve_project_id(project_name: str, runtime: RuntimeState | None = None) -> str:
+    target = project_name.strip()
+    if not target:
+        return ""
+    projects: list[dict[str, str]] = []
+    if runtime is not None:
+        with runtime.lock:
+            projects = list(runtime.cached_projects)
+    if not projects:
+        projects = list_projects()
+    for p in projects:
+        if p.get("name") == target and p.get("id"):
+            return str(p["id"])
+    low = target.lower()
+    for p in projects:
+        if str(p.get("name", "")).lower() == low and p.get("id"):
+            return str(p["id"])
+    return ""
+
+
 def ensure_user_config(config_path: Path) -> None:
     if config_path.is_file():
         return
@@ -1363,16 +1383,23 @@ def handle_wake_handoff(
     if runtime is not None:
         runtime.set_state("preparing")
 
-    prep = run_ax_helper(
+    proj_id = resolve_project_id(cfg.project_name, runtime=runtime)
+    prep_args = [
         "prepare-code-orchestrator",
         "--project",
         cfg.project_name,
-        "--model",
-        cfg.model_keyword,
-        "--effort",
-        cfg.thinking_effort,
-        timeout=15.0,
+    ]
+    if proj_id:
+        prep_args.extend(["--project-id", proj_id])
+    prep_args.extend(
+        [
+            "--model",
+            cfg.model_keyword,
+            "--effort",
+            cfg.thinking_effort,
+        ]
     )
+    prep = run_ax_helper(*prep_args, timeout=15.0)
     emit("prepare_result", **prep)
     if not prep.get("ok"):
         play_sound(cfg.sounds.cancel, cfg.sounds.volume, wait=False)

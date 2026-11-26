@@ -131,12 +131,32 @@ func axString(_ el: AXUIElement, _ attr: String) -> String {
     return ""
 }
 
+func axURLString(_ el: AXUIElement) -> String {
+    var v: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXURLAttribute as CFString, &v) == .success, let obj = v else {
+        return ""
+    }
+    if let url = obj as? URL { return url.absoluteString }
+    if let s = obj as? String { return s }
+    return ""
+}
+
 func axBool(_ el: AXUIElement, _ attr: String) -> Bool? {
     var v: AnyObject?
     guard AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success else { return nil }
     if let b = v as? Bool { return b }
     if let n = v as? NSNumber { return n.boolValue }
     return nil
+}
+
+func axSize(_ el: AXUIElement) -> CGSize? {
+    var sObj: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sObj) == .success else {
+        return nil
+    }
+    var sz = CGSize.zero
+    guard AXValueGetValue(sObj as! AXValue, .cgSize, &sz) else { return nil }
+    return sz
 }
 
 func axChildren(_ el: AXUIElement) -> [AXUIElement] {
@@ -162,6 +182,25 @@ func axWindows(_ axApp: AXUIElement) -> [AXUIElement] {
 
 func axPress(_ el: AXUIElement) -> Bool {
     AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
+}
+
+func axScrollToVisible(_ el: AXUIElement) {
+    _ = AXUIElementPerformAction(el, "AXScrollToVisible" as CFString)
+}
+
+func parseWebAreaURL(_ raw: String) -> (isNewChat: Bool, projectId: String) {
+    guard !raw.isEmpty, let comps = URLComponents(string: raw) else {
+        return (false, "")
+    }
+    let path = comps.path
+    let isNewChat = path.isEmpty || path == "/"
+    let projectId = comps.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+    return (isNewChat, projectId)
+}
+
+func isRunningModelDesc(_ desc: String) -> Bool {
+    desc.localizedCaseInsensitiveContains("applies to /btw") ||
+        desc.localizedCaseInsensitiveContains("cannot be changed while the agent is running")
 }
 
 func axElementAttr(_ el: AXUIElement, _ attr: String) -> AXUIElement? {
@@ -574,12 +613,21 @@ func getComposerHandles(_ axApp: AXUIElement?, _ webArea: AXUIElement) -> Compos
     return h
 }
 
+func hasConversationTurnsLandmark(_ webArea: AXUIElement) -> Bool {
+    axSearch(webArea, key: "AXLandmarkSearchKey", limit: 15).contains {
+        axString($0, kAXDescriptionAttribute) == "Conversation turns"
+    }
+}
+
 func getComposerState(_ app: NSRunningApplication, _ axApp: AXUIElement, _ webArea: AXUIElement) -> [String: Any] {
     let h = getComposerHandles(axApp, webArea)
     let text = h.msgInput.map { collectText($0) } ?? ""
     let modelDesc = h.modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
     let recActive = (h.activeBtn != nil)
     let dictDesc = h.activeBtn.map { axString($0, kAXDescriptionAttribute) } ?? (h.idleBtn.map { axString($0, kAXDescriptionAttribute) } ?? "")
+    let webUrl = axURLString(webArea)
+    let parsedUrl = parseWebAreaURL(webUrl)
+    let isNewConv = parsedUrl.isNewChat && h.cancelBtn == nil && !isRunningModelDesc(modelDesc) && !hasConversationTurnsLandmark(webArea)
 
     return [
         "ok": true,
@@ -590,7 +638,9 @@ func getComposerState(_ app: NSRunningApplication, _ axApp: AXUIElement, _ webAr
         "recording_active": recActive,
         "dictation_button_desc": dictDesc,
         "send_button_present": h.sendBtn != nil,
-        "model_desc": modelDesc
+        "model_desc": modelDesc,
+        "webarea_url": webUrl,
+        "is_new_conversation": isNewConv
     ]
 }
 
@@ -668,79 +718,128 @@ func runActivate() -> ([String: Any], Int32) {
     ], 0)
 }
 
-func runPrepare(project: String, modelKeyword: String, effort: String) -> ([String: Any], Int32) {
+func runPrepare(project: String, projectId: String, modelKeyword: String, effort: String) -> ([String: Any], Int32) {
     guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
     guard let (_, axApp, window, initialWa) = activateAntigravity() else {
         return failDict("antigravity_activate_failed")
     }
     var wa = initialWa
 
-    func findProjectButton(_ root: AXUIElement) -> AXUIElement? {
-        if let hit = axSearch(root, key: "AXButtonSearchKey", text: project, limit: 30).first(where: {
-            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
-        }) {
-            return hit
-        }
-        return findFirst(root, maxNodes: 2500, maxDepth: 40) {
-            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
+    func candidateLabel(_ el: AXUIElement) -> String {
+        let t = axString(el, kAXTitleAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { return t }
+        let d = axString(el, kAXDescriptionAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !d.isEmpty { return d }
+        let texts = findAll(el, maxNodes: 20, maxDepth: 4) { axString($0, kAXRoleAttribute) == "AXStaticText" }
+            .map {
+                let v = axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+                return v.isEmpty ? axString($0, kAXTitleAttribute).trimmingCharacters(in: .whitespacesAndNewlines) : v
+            }
+            .filter { !$0.isEmpty }
+        return texts.joined(separator: " ")
+    }
+
+    func findSidebar(_ root: AXUIElement) -> AXUIElement? {
+        axSearch(root, key: "AXLandmarkSearchKey", limit: 15).first {
+            axString($0, kAXDescriptionAttribute) == "Sidebar"
         }
     }
 
-    // 1. Find project button in sidebar; toggle sidebar if hidden
-    var projBtn = findProjectButton(wa)
-    if projBtn == nil {
-        let hasNewConvLink = axSearch(wa, key: "AXLinkSearchKey", text: "New Conversation", limit: 5).contains {
-            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
-        } || findFirst(wa, maxNodes: 600, maxDepth: 25) {
-            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
-        } != nil
-        if !hasNewConvLink {
-            let toggleBtn = axSearch(wa, key: "AXButtonSearchKey", text: "Toggle Sidebar", limit: 5).first(where: {
-                axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
-            }) ?? findFirst(wa, maxNodes: 400, maxDepth: 20) {
-                axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
-            }
-            if let toggleBtn = toggleBtn {
-                _ = axPress(toggleBtn)
-                usleep(350_000)
-                projBtn = findProjectButton(wa)
-            }
+    func ensureSidebarOpen(_ root: AXUIElement) -> AXUIElement? {
+        if let sb = findSidebar(root) {
+            return sb
         }
+        let toggleBtn = axSearch(root, key: "AXButtonSearchKey", text: "Toggle Sidebar", limit: 5).first(where: {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
+        }) ?? findFirst(root, maxNodes: 400, maxDepth: 20) {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
+        }
+        if let toggleBtn = toggleBtn {
+            _ = axPress(toggleBtn)
+            usleep(350_000)
+        }
+        return findSidebar(root)
     }
 
-    let prevTitle = axString(wa, kAXTitleAttribute)
-    var openedViaSidebar = false
-    if let btn = projBtn {
+    func findTargetNewInProjectLink(_ root: AXUIElement) -> (link: AXUIElement, resolvedProjectId: String)? {
+        let scope = ensureSidebarOpen(root) ?? root
+        if !projectId.isEmpty {
+            let links = axSearch(scope, key: "AXLinkSearchKey", text: "New Conversation in Project", limit: 40).filter {
+                axString($0, kAXRoleAttribute) == "AXLink" &&
+                    axString($0, kAXDescriptionAttribute) == "New Conversation in Project" &&
+                    parseWebAreaURL(axURLString($0)).projectId == projectId
+            }
+            if let exact = links.first {
+                return (exact, projectId)
+            }
+        }
+        let projBtn = axSearch(scope, key: "AXButtonSearchKey", text: project, limit: 30).first(where: {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
+        }) ?? findFirst(scope, maxNodes: 1500, maxDepth: 35) {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
+        }
+        guard let btn = projBtn else { return nil }
         var cur: AXUIElement? = btn
         for _ in 1...4 {
-            if let p = cur.flatMap(axParent) {
-                cur = p
-                let newInProj = axSearch(p, key: "AXLinkSearchKey", text: "New Conversation in Project", limit: 5).first(where: {
-                    axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation in Project"
-                }) ?? findFirst(p, maxNodes: 80, maxDepth: 6) {
-                    axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation in Project"
-                }
-                if let newInProj = newInProj, axPress(newInProj) {
-                    openedViaSidebar = true
-                    break
-                }
+            guard let p = cur.flatMap(axParent) else { break }
+            cur = p
+            let links = axSearch(p, key: "AXLinkSearchKey", text: "New Conversation in Project", limit: 6).filter {
+                axString($0, kAXRoleAttribute) == "AXLink" &&
+                    axString($0, kAXDescriptionAttribute) == "New Conversation in Project"
+            }
+            if links.count == 1, let link = links.first {
+                let parsed = parseWebAreaURL(axURLString(link))
+                return (link, parsed.projectId)
+            }
+            if links.count > 1 {
+                // Climbed above the single project row into the full Projects container; never pick another project.
+                break
             }
         }
+        return nil
     }
 
+    func pressLinkSafely(_ link: AXUIElement) -> Bool {
+        axScrollToVisible(link)
+        if (axSize(link)?.height ?? 0) <= 6.0 {
+            usleep(150_000)
+        }
+        return axPress(link)
+    }
+
+    func pressTopNewConversation(_ root: AXUIElement) -> Bool {
+        let scope = ensureSidebarOpen(root) ?? root
+        let link = axSearch(scope, key: "AXLinkSearchKey", text: "New Conversation", limit: 10).first(where: {
+            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
+        }) ?? findFirst(scope, maxNodes: 400, maxDepth: 20) {
+            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
+        }
+        guard let l = link else { return false }
+        return pressLinkSafely(l)
+    }
+
+    // 1. Open brand-new conversation via scoped Sidebar target project link or top New Conversation link
+    var expectedProjectId = projectId
+    var openedViaSidebar = false
+    if let target = findTargetNewInProjectLink(wa) {
+        if expectedProjectId.isEmpty && !target.resolvedProjectId.isEmpty {
+            expectedProjectId = target.resolvedProjectId
+        }
+        openedViaSidebar = pressLinkSafely(target.link)
+    }
     if !openedViaSidebar {
-        // Fallback: Cmd+Shift+K -> paste project name -> Enter
-        sendKeyCombo(keyCode: 40, flags: [.maskCommand, .maskShift]) // K = 40
-        usleep(350_000)
-        pasteString(project)
-        sendKeyCombo(keyCode: 36, flags: []) // Return
-        usleep(450_000)
+        _ = pressTopNewConversation(wa)
     }
 
-    // 2. Wait up to 5.0s for new empty conversation in target project via Chromium AX search predicates
+    // 2. Wait up to 5.0s and verify WebArea actually landed on a brand-new empty chat (never an existing/running /c/... chat)
     var projectVerified = false
     var msgInput: AXUIElement?
     var modelBtn: AXUIElement?
+    var retriedProjectLink = false
+    var retriedTopNewConv = false
+    var lastUrl = ""
+    var lastIsNewChat = false
+    var lastHasTurns = false
     let waitStart = Date()
     let waitDeadline = waitStart.addingTimeInterval(5.0)
     while Date() < waitDeadline {
@@ -751,33 +850,81 @@ func runPrepare(project: String, modelKeyword: String, effort: String) -> ([Stri
         }
         if msgInput == nil {
             wa = findMainWebArea(window) ?? wa
-        } else {
-            let emptyInput = collectText(msgInput!).isEmpty
-            if emptyInput {
-                let projectPickers = axSearch(wa, key: "AXControlSearchKey", text: "Select project", limit: 10).filter {
-                    axString($0, kAXRoleAttribute) == "AXPopUpButton" && axString($0, kAXDescriptionAttribute).hasPrefix("Select project")
-                }
-                let matchingPicker = projectPickers.first {
-                    axString($0, kAXDescriptionAttribute).localizedCaseInsensitiveContains(project)
-                }
-                let mismatchedPicker = (matchingPicker == nil) ? projectPickers.first : nil
-                if matchingPicker != nil {
-                    projectVerified = true
-                    break
-                } else if openedViaSidebar && mismatchedPicker == nil {
-                    let curTitle = axString(wa, kAXTitleAttribute)
-                    let mDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
-                    let elapsed = Date().timeIntervalSince(waitStart)
-                    if (curTitle != prevTitle && curTitle.localizedCaseInsensitiveContains(" - \(project) - ")) ||
-                       (mDesc.hasPrefix("Select model") && elapsed >= 0.4) ||
-                       elapsed >= 1.2 {
-                        projectVerified = true
-                        break
-                    }
+            usleep(150_000)
+            continue
+        }
+        let curUrl = axURLString(wa)
+        lastUrl = curUrl
+        let parsed = parseWebAreaURL(curUrl)
+        lastIsNewChat = parsed.isNewChat
+        let hasTurns = hasConversationTurnsLandmark(wa)
+        lastHasTurns = hasTurns
+        let mDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
+        let isRunning = (handles.cancelBtn != nil) || isRunningModelDesc(mDesc)
+        let emptyInput = collectText(msgInput!).isEmpty
+        let elapsed = Date().timeIntervalSince(waitStart)
+
+        if emptyInput && !isRunning && !hasTurns && parsed.isNewChat {
+            let projectPickers = axSearch(wa, key: "AXControlSearchKey", text: "Select project", limit: 10).filter {
+                axString($0, kAXRoleAttribute) == "AXPopUpButton" && axString($0, kAXDescriptionAttribute).hasPrefix("Select project")
+            }
+            let matchingPicker = projectPickers.first {
+                axString($0, kAXDescriptionAttribute).localizedCaseInsensitiveContains(project)
+            }
+            let mismatchedPicker = (matchingPicker == nil) ? projectPickers.first : nil
+
+            if matchingPicker != nil {
+                projectVerified = true
+                break
+            } else if !expectedProjectId.isEmpty && parsed.projectId == expectedProjectId && mismatchedPicker == nil {
+                projectVerified = true
+                break
+            } else if expectedProjectId.isEmpty && openedViaSidebar && mismatchedPicker == nil && elapsed >= 0.4 {
+                projectVerified = true
+                break
+            } else if let wrongPicker = mismatchedPicker {
+                // On a brand-new `/` page with wrong project selected: switch via Select project picker.
+                _ = axPress(wrongPicker)
+                usleep(300_000)
+                if let item = findFirst(wa, maxNodes: 3000, maxDepth: 40, where: { el in
+                    let r = axString(el, kAXRoleAttribute)
+                    guard r == "AXMenuItem" || r == "AXButton" else { return false }
+                    return candidateLabel(el).localizedCaseInsensitiveContains(project)
+                }) {
+                    _ = axPress(item)
+                    usleep(300_000)
+                    continue
                 }
             }
         }
+
+        if !retriedProjectLink && elapsed >= 1.1 {
+            retriedProjectLink = true
+            if let target = findTargetNewInProjectLink(wa) {
+                if expectedProjectId.isEmpty && !target.resolvedProjectId.isEmpty {
+                    expectedProjectId = target.resolvedProjectId
+                }
+                if pressLinkSafely(target.link) {
+                    openedViaSidebar = true
+                }
+            }
+        } else if !retriedTopNewConv && elapsed >= 2.6 && (!parsed.isNewChat || hasTurns || isRunning) {
+            retriedTopNewConv = true
+            _ = pressTopNewConversation(wa)
+        }
         usleep(150_000)
+    }
+
+    if !projectVerified {
+        return ([
+            "ok": false,
+            "opened_via_sidebar": openedViaSidebar,
+            "project_verified": false,
+            "webarea_url": lastUrl,
+            "is_new_chat_url": lastIsNewChat,
+            "has_turns": lastHasTurns,
+            "error": "new_conversation_not_verified"
+        ], 1)
     }
 
     // 3. Verify or select target model & thinking effort
@@ -834,20 +981,6 @@ func runPrepare(project: String, modelKeyword: String, effort: String) -> ([Stri
         let normEff = normalizeTargetEffort(targetEffort)
         if normEff.isEmpty { return true }
         return extractEffort(extractCurrentModelLabel(desc)) == normEff
-    }
-
-    func candidateLabel(_ el: AXUIElement) -> String {
-        let t = axString(el, kAXTitleAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
-        if !t.isEmpty { return t }
-        let d = axString(el, kAXDescriptionAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
-        if !d.isEmpty { return d }
-        let texts = findAll(el, maxNodes: 20, maxDepth: 4) { axString($0, kAXRoleAttribute) == "AXStaticText" }
-            .map {
-                let v = axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
-                return v.isEmpty ? axString($0, kAXTitleAttribute).trimmingCharacters(in: .whitespacesAndNewlines) : v
-            }
-            .filter { !$0.isEmpty }
-        return texts.joined(separator: " ")
     }
 
     let normEffort = normalizeTargetEffort(effort)
@@ -916,6 +1049,7 @@ func runPrepare(project: String, modelKeyword: String, effort: String) -> ([Stri
         "ok": projectVerified && modelOk,
         "opened_via_sidebar": openedViaSidebar,
         "project_verified": projectVerified,
+        "webarea_url": lastUrl,
         "model_desc": modelDesc,
         "focused": focused
     ], (projectVerified && modelOk) ? 0 : 1)
@@ -1242,6 +1376,7 @@ func dispatchCommand(_ argv: [String]) -> ([String: Any], Int32) {
     case "prepare-code-orchestrator":
         return runPrepare(
             project: argValue(in: argv, "--project", defaultVal: "Code"),
+            projectId: argValue(in: argv, "--project-id", defaultVal: ""),
             modelKeyword: argValue(in: argv, "--model", defaultVal: "Orchestrator"),
             effort: argValue(in: argv, "--effort", defaultVal: "")
         )
