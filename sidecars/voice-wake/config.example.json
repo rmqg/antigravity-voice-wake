@@ -1,0 +1,28 @@
+{
+  "ui_language": "auto",
+  "project_name": "",
+  "model_keyword": "Orchestrator",
+  "thinking_effort": "",
+  "mic_mode": "built-in",
+  "voice_wake_enabled": true,
+  "wake_mode": "text",
+  "wake_phrase": "HEY GRAVITY",
+  "wake_aliases": [],
+  "voice_sample_threshold": 0.72,
+  "hotkey_enabled": true,
+  "hotkey": "ctrl+g",
+  "keywords_file": "keywords.txt",
+  "keywords_score": 1.0,
+  "keywords_threshold": 0.25,
+  "wait_for_speech_timeout_sec": 10.0,
+  "silence_timeout_sec": 1.8,
+  "max_dictation_sec": 60.0,
+  "transcript_settle_sec": 0.4,
+  "cooldown_sec": 1.5,
+  "sounds": {
+    "ready": "/System/Library/Sounds/Tink.aiff",
+    "submit": "/System/Library/Sounds/Glass.aiff",
+    "cancel": "/System/Library/Sounds/Pop.aiff",
+    "volume": 0.5
+  }
+}

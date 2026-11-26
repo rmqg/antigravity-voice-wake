@@ -1,0 +1,2807 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Wake</title>
+  <script src="/preload.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --vw-fg: #18181b;
+      --vw-fg-muted: #71717a;
+      --vw-bg-contrast: #ffffff;
+      --vw-hairline: rgba(24, 24, 27, 0.09);
+      --vw-surface: rgba(24, 24, 27, 0.042);
+      --vw-surface-hover: rgba(24, 24, 27, 0.075);
+      --vw-surface-raised: #ffffff;
+      --vw-ok: #16a34a;
+      --vw-warn: #d97706;
+      --vw-err: #dc2626;
+      --vw-accent: #2563eb;
+      --vw-accent-soft: rgba(37, 99, 235, 0.10);
+      --vw-warn-soft: rgba(217, 119, 6, 0.10);
+      --vw-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+      --vw-mono: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+      --vw-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2371717a' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --vw-fg: #f4f4f5;
+        --vw-fg-muted: #a1a1aa;
+        --vw-bg-contrast: #18181b;
+        --vw-hairline: rgba(244, 244, 245, 0.10);
+        --vw-surface: rgba(244, 244, 245, 0.06);
+        --vw-surface-hover: rgba(244, 244, 245, 0.10);
+        --vw-surface-raised: rgba(255, 255, 255, 0.11);
+        --vw-ok: #4ade80;
+        --vw-warn: #fbbf24;
+        --vw-err: #f87171;
+        --vw-accent: #60a5fa;
+        --vw-accent-soft: rgba(96, 165, 250, 0.14);
+        --vw-warn-soft: rgba(251, 191, 36, 0.13);
+        --vw-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%23a1a1aa' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--foreground, var(--vw-fg));
+      font-family: var(--vw-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 14%, transparent);
+      border-radius: 999px;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Sticky minimal header */
+    .top-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      padding: 14px 20px 0 20px;
+      background: var(--background, transparent);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .brand-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 20px;
+    }
+
+    .brand-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .brand-name {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    .toast {
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-height: 16px;
+      opacity: 0;
+      transition: opacity 0.18s ease, color 0.15s ease;
+    }
+    .toast.show { opacity: 1; }
+    .toast.ok { color: var(--vw-ok); }
+    .toast.err { color: var(--vw-err); }
+    .toast.warn { color: var(--vw-warn); }
+
+    .nav-tabs {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      margin-top: 12px;
+      border-bottom: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 9%, transparent);
+    }
+
+    .nav-tab {
+      position: relative;
+      appearance: none;
+      background: transparent;
+      border: none;
+      padding: 0 0 9px 0;
+      margin: 0;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      cursor: pointer;
+      transition: color 0.14s ease;
+    }
+    .nav-tab:hover { color: var(--foreground, var(--vw-fg)); }
+    .nav-tab.active {
+      color: var(--foreground, var(--vw-fg));
+      font-weight: 600;
+    }
+    .nav-tab.active::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 1.5px;
+      border-radius: 2px;
+      background: var(--foreground, var(--vw-fg));
+    }
+
+    /* Tab Panels */
+    .panel {
+      display: none;
+      padding: 0 20px 32px 20px;
+    }
+    .panel.active { display: block; }
+
+    /* Status dots */
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted-foreground, var(--vw-fg-muted));
+      transition: background-color 0.2s ease;
+    }
+    .dot-lg { width: 9px; height: 9px; }
+
+    .dot.listening {
+      background: var(--vw-ok);
+      animation: vw-breathe 2.4s ease-in-out infinite;
+    }
+    .dot.wake_test { background: var(--vw-accent); }
+    .dot.recording_sample,
+    .dot.dictating {
+      background: var(--vw-err);
+      animation: vw-breathe-red 1.2s ease-in-out infinite;
+    }
+    .dot.hotkey_only { background: var(--vw-accent); }
+    .dot.paused,
+    .dot.initializing,
+    .dot.cooldown { background: var(--muted-foreground, var(--vw-fg-muted)); opacity: 0.7; }
+    .dot.preparing,
+    .dot.submitting,
+    .dot.switching { background: var(--vw-warn); }
+    .dot.error { background: var(--vw-err); }
+
+    @keyframes vw-breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.28); }
+      50% { box-shadow: 0 0 0 5px rgba(22, 163, 74, 0); }
+    }
+    @keyframes vw-breathe-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.28); }
+      50% { box-shadow: 0 0 0 5px rgba(220, 38, 38, 0); }
+    }
+
+    /* Tab 1: Pure Hero Live Status */
+    .hero {
+      padding: 28px 0 24px 0;
+    }
+
+    .hero-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .hero-title {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.25;
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    .hero-sub {
+      margin-top: 7px;
+      min-height: 20px;
+      font-size: 12.5px;
+      line-height: 1.48;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      transition: color 0.16s ease;
+    }
+    .hero-sub.ok { color: var(--vw-ok); }
+    .hero-sub.warn { color: var(--vw-warn); }
+    .hero-sub.err { color: var(--vw-err); }
+    .hero-sub.info { color: var(--vw-accent); }
+
+    .primary-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    button {
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      color: var(--foreground, var(--vw-fg));
+      background: var(--vw-surface);
+      transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, opacity 0.14s ease;
+    }
+    button:hover:not(:disabled) {
+      background: var(--vw-surface-hover);
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    #btn-pause {
+      flex: 1;
+      height: 36px;
+      padding: 0 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-weight: 550;
+    }
+    #btn-pause.btn-state-pause {
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 6%, transparent);
+      color: var(--foreground, var(--vw-fg));
+    }
+    #btn-pause.btn-state-pause:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 10%, transparent);
+    }
+    #btn-pause.btn-state-start {
+      background: var(--foreground, var(--vw-fg));
+      color: var(--background, var(--vw-bg-contrast));
+    }
+    #btn-pause.btn-state-start:hover:not(:disabled) {
+      opacity: 0.88;
+    }
+    #btn-pause.btn-busy {
+      background: var(--vw-surface);
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    #btn-wake-test {
+      height: 36px;
+      padding: 0 14px;
+      background: transparent;
+      border-color: color-mix(in srgb, var(--foreground, var(--vw-fg)) 12%, transparent);
+      color: var(--foreground, var(--vw-fg));
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    #btn-wake-test:hover:not(:disabled) {
+      background: var(--vw-surface);
+    }
+    #btn-wake-test.btn-active-test {
+      background: var(--vw-accent-soft);
+      border-color: color-mix(in srgb, var(--vw-accent) 28%, transparent);
+      color: var(--vw-accent);
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      border-right-color: transparent;
+      animation: vw-spin 0.65s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes vw-spin { to { transform: rotate(360deg); } }
+
+    .wake-test-bar {
+      display: none;
+      margin-top: 16px;
+      padding: 11px 12px;
+      border-radius: 8px;
+      background: var(--vw-accent-soft);
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .wake-test-bar.show { display: flex; }
+
+    .wake-test-meta {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    #wake-test-summary {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--vw-accent);
+      font-variant-numeric: tabular-nums;
+    }
+    .wake-test-sub {
+      font-size: 11.5px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      font-variant-numeric: tabular-nums;
+      line-height: 1.4;
+    }
+
+    .btn-text {
+      appearance: none;
+      background: transparent;
+      border: none;
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-text:hover:not(:disabled) {
+      background: transparent;
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    /* Aligned Telemetry Key-Value List */
+    .kv-list {
+      margin: 0;
+      border-top: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 9%, transparent);
+    }
+
+    .kv-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 13px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 9%, transparent);
+    }
+
+    .kv-row dt {
+      flex-shrink: 0;
+      font-size: 12.5px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    .kv-row dd {
+      margin: 0;
+      min-width: 0;
+      text-align: right;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--foreground, var(--vw-fg));
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .kv-row dd.warn-val { color: var(--vw-warn); }
+
+    /* Form Sections (Tab 2 & Tab 3) */
+    .group {
+      padding-top: 22px;
+    }
+    .group + .group {
+      margin-top: 24px;
+      border-top: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 9%, transparent);
+    }
+
+    .group-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      margin-bottom: 10px;
+    }
+
+    /* Native-feel switch rows */
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 0;
+      cursor: pointer;
+    }
+    .switch-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    input[type="checkbox"].sw {
+      position: relative;
+      appearance: none;
+      width: 32px;
+      height: 18px;
+      margin: 0;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 18%, transparent);
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background-color 0.16s ease;
+    }
+    input[type="checkbox"].sw::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+      transition: transform 0.16s ease;
+    }
+    input[type="checkbox"].sw:checked {
+      background: var(--vw-ok);
+    }
+    input[type="checkbox"].sw:checked::after {
+      transform: translateX(14px);
+    }
+
+    /* Aligned label-control rows */
+    .form-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      transition: opacity 0.16s ease;
+    }
+    .form-row.dimmed {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .row-label {
+      width: 82px;
+      flex-shrink: 0;
+      font-size: 12.5px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      white-space: nowrap;
+    }
+
+    .row-ctrl {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    input[type="text"],
+    select {
+      width: 100%;
+      height: 32px;
+      padding: 0 10px;
+      font-family: inherit;
+      font-size: 12.5px;
+      color: var(--foreground, var(--vw-fg));
+      background: var(--vw-surface);
+      border: 1px solid transparent;
+      border-radius: 7px;
+      outline: none;
+      transition: background-color 0.14s ease, border-color 0.14s ease;
+    }
+    input[type="text"]:hover,
+    select:hover:not(:disabled) {
+      background: var(--vw-surface-hover);
+    }
+    input[type="text"]:focus,
+    select:focus {
+      background: var(--vw-surface);
+      border-color: color-mix(in srgb, var(--foreground, var(--vw-fg)) 24%, transparent);
+    }
+    select {
+      appearance: none;
+      padding-right: 28px;
+      background-image: var(--vw-chevron);
+      background-repeat: no-repeat;
+      background-position: right 9px center;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-soft {
+      height: 32px;
+      padding: 0 11px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--vw-surface);
+      color: var(--foreground, var(--vw-fg));
+      white-space: nowrap;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    .btn-soft:hover:not(:disabled) {
+      background: var(--vw-surface-hover);
+    }
+    .btn-soft.recording {
+      background: var(--vw-warn-soft);
+      color: var(--vw-warn);
+    }
+
+    /* Segmented control */
+    .seg-control {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 3px;
+      padding: 3px;
+      border-radius: 9px;
+      background: var(--vw-surface);
+    }
+    .seg-control.cols-3 {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .seg-btn {
+      height: 28px;
+      padding: 0 8px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+    }
+    .seg-btn:hover:not(.active) {
+      background: transparent;
+      color: var(--foreground, var(--vw-fg));
+    }
+    .seg-btn.active {
+      background: var(--vw-surface-raised);
+      color: var(--foreground, var(--vw-fg));
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+
+    .mode-desc {
+      margin-top: 10px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    .phrase-tip {
+      display: none;
+      margin: 10px 0 0 94px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+    .phrase-tip.show { display: block; }
+    .phrase-tip.warn { color: var(--vw-warn); }
+
+    /* Voice sample management */
+    .sub-block {
+      margin-top: 22px;
+    }
+
+    .sub-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .sub-title {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    .readout {
+      font-family: var(--vw-mono);
+      font-size: 11.5px;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    .sample-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #btn-rec-sample {
+      flex: 1;
+      height: 34px;
+      font-weight: 550;
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 7%, transparent);
+    }
+    #btn-rec-sample:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 11%, transparent);
+    }
+
+    .samples-list {
+      margin-top: 10px;
+    }
+
+    .sample-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 8%, transparent);
+    }
+    .sample-row:last-child { border-bottom: none; }
+
+    .sample-info {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--foreground, var(--vw-fg));
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sample-btns {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .icon-btn {
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .icon-btn:hover {
+      background: var(--vw-surface);
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    .empty-note {
+      padding: 12px 0;
+      font-size: 12px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    /* Sliders */
+    .slider-block {
+      margin-top: 20px;
+    }
+    .slider-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .slider-label {
+      font-size: 12.5px;
+      color: var(--foreground, var(--vw-fg));
+    }
+    .slider-ends {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 5px;
+      font-size: 11px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 3px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--foreground, var(--vw-fg)) 15%, transparent);
+      outline: none;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--foreground, var(--vw-fg));
+      border: 2px solid var(--background, var(--vw-bg-contrast));
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+      cursor: pointer;
+      transition: transform 0.12s ease;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.12);
+    }
+
+    .preset-desc {
+      margin-top: 8px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    details.adv-details {
+      margin-top: 18px;
+      border-top: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 8%, transparent);
+      padding-top: 12px;
+    }
+    details.adv-details summary,
+    details.logs-details summary {
+      list-style: none;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      user-select: none;
+    }
+    details.adv-details summary::-webkit-details-marker,
+    details.logs-details summary::-webkit-details-marker {
+      display: none;
+    }
+    details.adv-details summary:hover,
+    details.logs-details summary:hover {
+      color: var(--foreground, var(--vw-fg));
+    }
+    details.adv-details[open] summary,
+    details.logs-details[open] summary {
+      color: var(--foreground, var(--vw-fg));
+    }
+
+    /* Tab 3: Diagnostics & Human-readable Activity Records */
+    .diag-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .diag-actions .btn-soft {
+      flex: 1;
+      height: 34px;
+    }
+
+    .diag-hint {
+      margin-top: 8px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    .diag-wrap {
+      display: none;
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--vw-surface);
+    }
+    .diag-wrap.show { display: block; }
+    .diag-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+    .diag-list {
+      margin: 0;
+    }
+    .diag-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 6px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 7%, transparent);
+      font-size: 12px;
+    }
+    .diag-row:last-child { border-bottom: none; }
+    .diag-row dt {
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      flex-shrink: 0;
+    }
+    .diag-row dd {
+      margin: 0;
+      text-align: right;
+      font-weight: 500;
+      color: var(--foreground, var(--vw-fg));
+      word-break: break-word;
+    }
+    .diag-row dd.ok { color: var(--vw-ok); }
+    .diag-row dd.warn { color: var(--vw-warn); }
+
+    details.logs-details {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 8%, transparent);
+    }
+    .logs-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .logs-list {
+      margin-top: 10px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .log-item {
+      padding: 8px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 7%, transparent);
+    }
+    .log-item:last-child { border-bottom: none; }
+    .log-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .log-ev {
+      color: var(--foreground, var(--vw-fg));
+      font-weight: 500;
+    }
+    .log-ts {
+      font-family: var(--vw-mono);
+      font-size: 11px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      font-variant-numeric: tabular-nums;
+    }
+    .log-detail {
+      margin-top: 2px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+      word-break: break-word;
+    }
+
+    .settings-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 26px;
+      padding-top: 14px;
+      border-top: 1px solid color-mix(in srgb, var(--foreground, var(--vw-fg)) 9%, transparent);
+    }
+    .footer-note {
+      font-size: 11.5px;
+      color: var(--muted-foreground, var(--vw-fg-muted));
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="top-header">
+      <div class="brand-bar">
+        <div class="brand-left">
+          <span id="header-dot" class="dot"></span>
+          <span class="brand-name">Voice Wake</span>
+        </div>
+        <span id="save-toast" class="toast"></span>
+      </div>
+      <nav class="nav-tabs" role="tablist">
+        <button class="nav-tab active" type="button" role="tab" data-tab="status" aria-selected="true" data-i18n="tab_status">Status</button>
+        <button class="nav-tab" type="button" role="tab" data-tab="wake" aria-selected="false" data-i18n="tab_wake">Wake</button>
+        <button class="nav-tab" type="button" role="tab" data-tab="settings" aria-selected="false" data-i18n="tab_settings">Settings</button>
+      </nav>
+    </header>
+
+    <!-- Tab 1: Pure Live Status -->
+    <section id="panel-status" class="panel active" role="tabpanel">
+      <div class="hero">
+        <div class="hero-head">
+          <span id="status-dot" class="dot dot-lg"></span>
+          <span id="status-text" class="hero-title" data-i18n="state_initializing">Starting</span>
+        </div>
+        <div id="hero-sub" class="hero-sub" data-i18n="sub_connecting">Connecting to local voice service…</div>
+
+        <div class="primary-actions">
+          <button id="btn-pause" class="btn-state-pause" type="button" data-i18n="btn_pause">Pause</button>
+          <button id="btn-wake-test" type="button" data-i18n="btn_test_wake" data-i18n-title="title_test_wake" title="Checks wake detection with a chime only, without opening a chat">Test Wake</button>
+        </div>
+
+        <div id="wake-test-bar" class="wake-test-bar">
+          <div class="wake-test-meta">
+            <span id="wake-test-summary">0 hits</span>
+            <span id="wake-test-sub" class="wake-test-sub">Say your wake phrase to test detection</span>
+          </div>
+          <button id="btn-wake-reset" class="btn-text" type="button" data-i18n="btn_reset">Reset</button>
+        </div>
+      </div>
+
+      <dl class="kv-list">
+        <div class="kv-row"><dt data-i18n="kv_mode">Wake Mode</dt><dd id="badge-mode">-</dd></div>
+        <div class="kv-row"><dt data-i18n="kv_hotkey">Hotkey</dt><dd id="badge-hotkey">-</dd></div>
+        <div class="kv-row"><dt data-i18n="kv_mic">Microphone</dt><dd id="badge-mic">-</dd></div>
+        <div class="kv-row"><dt data-i18n="kv_target">New Chat</dt><dd id="badge-target">-</dd></div>
+        <div id="row-ax-warn" class="kv-row hidden"><dt data-i18n="kv_perm">Permissions</dt><dd class="warn-val" data-i18n="val_ax_required">Accessibility Required</dd></div>
+      </dl>
+    </section>
+
+    <!-- Tab 2 & Tab 3 shared config form -->
+    <form id="cfg-form">
+      <!-- Tab 2: Wake Config -->
+      <section id="panel-wake" class="panel" role="tabpanel">
+        <div class="group">
+          <div class="group-title" data-i18n="grp_triggers">Triggers</div>
+          <label class="switch-row" for="f-voice-en">
+            <span class="switch-label" data-i18n="lbl_voice_wake">Voice Wake</span>
+            <input id="f-voice-en" class="sw" type="checkbox" checked />
+          </label>
+          <label class="switch-row" for="f-hotkey-en">
+            <span class="switch-label" data-i18n="lbl_global_hotkey">Global Hotkey</span>
+            <input id="f-hotkey-en" class="sw" type="checkbox" checked />
+          </label>
+          <div id="row-hotkey" class="form-row">
+            <label class="row-label" for="f-hotkey" data-i18n="lbl_hotkey">Hotkey</label>
+            <div class="row-ctrl">
+              <input id="f-hotkey" type="text" placeholder="ctrl+g" aria-label="Global Hotkey" />
+              <button id="btn-rec-hotkey" class="btn-soft" type="button" data-i18n="btn_record_key">Record</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title" data-i18n="grp_recognition">Wake Recognition</div>
+          <div class="seg-control" role="tablist">
+            <button id="tab-mode-text" class="seg-btn active" type="button" data-mode="text" data-i18n="mode_text">English Phrase</button>
+            <button id="tab-mode-sample" class="seg-btn" type="button" data-mode="voice_sample" data-i18n="mode_sample">Recorded Voice</button>
+          </div>
+          <div id="mode-desc" class="mode-desc">Type any English wake phrase; use Recorded Voice for non-English or custom words.</div>
+
+          <div class="form-row" style="margin-top: 14px;">
+            <label id="lbl-wake" class="row-label" for="f-wake">Wake Phrase</label>
+            <div class="row-ctrl">
+              <input id="f-wake" type="text" placeholder="HEY GRAVITY" required />
+            </div>
+          </div>
+          <div id="wake-phrase-tip" class="phrase-tip"></div>
+
+          <div id="voice-sample-section" class="sub-block hidden">
+            <div class="sub-head">
+              <span class="sub-title" data-i18n="lbl_voice_samples">Voice Samples</span>
+              <span id="sample-count-badge" class="readout">0</span>
+            </div>
+            <div class="sample-actions">
+              <button id="btn-rec-sample" class="btn-soft" type="button" data-i18n="btn_rec_sample">Record Sample</button>
+              <button id="btn-import-sample" class="btn-soft" type="button" data-i18n="btn_import_audio">Import Audio</button>
+              <button id="btn-clear-samples" class="btn-text" type="button" data-i18n="btn_clear">Clear</button>
+              <input id="file-import-sample" type="file" accept=".wav,.m4a,.mp3,audio/*" class="hidden" />
+            </div>
+            <div id="samples-list" class="samples-list"></div>
+
+            <div class="slider-block">
+              <div class="slider-head">
+                <label class="slider-label" for="f-sample-thresh" data-i18n="lbl_match_strictness">Match Strictness</label>
+                <span id="v-sample-thresh" class="readout">0.72</span>
+              </div>
+              <input id="f-sample-thresh" type="range" min="0.55" max="0.90" step="0.02" value="0.72" />
+              <div class="slider-ends">
+                <span data-i18n="end_loose">Loose 0.55</span>
+                <span data-i18n="end_strict">Strict 0.90</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="text-kws-section" class="sub-block">
+            <div class="form-row" style="margin-top: 0;">
+              <label class="row-label" for="f-aliases" data-i18n="lbl_aliases">Aliases</label>
+              <div class="row-ctrl">
+                <input id="f-aliases" type="text" data-i18n-placeholder="ph_aliases" placeholder="Optional, comma-separated" />
+              </div>
+            </div>
+
+            <div class="sub-head" style="margin-top: 20px;">
+              <span class="sub-title" data-i18n="lbl_sensitivity">Sensitivity</span>
+              <span id="preset-badge" class="readout">Balanced</span>
+            </div>
+            <div class="seg-control cols-3">
+              <button class="seg-btn preset-btn" type="button" data-preset="sensitive" data-thresh="0.15" data-score="1.0" data-i18n="preset_sensitive">Sensitive</button>
+              <button class="seg-btn preset-btn" type="button" data-preset="balanced" data-thresh="0.25" data-score="1.0" data-i18n="preset_balanced">Balanced</button>
+              <button class="seg-btn preset-btn" type="button" data-preset="strict" data-thresh="0.35" data-score="1.0" data-i18n="preset_strict">Strict</button>
+            </div>
+            <div id="preset-desc" class="preset-desc">Recommended default balancing recall and false-wake prevention.</div>
+
+            <details class="adv-details">
+              <summary data-i18n="lbl_advanced">Advanced</summary>
+              <div class="slider-block" style="margin-top: 14px;">
+                <div class="slider-head">
+                  <label class="slider-label" for="f-thresh" data-i18n="lbl_kws_thresh">Trigger Threshold</label>
+                  <span id="v-thresh" class="readout">0.25</span>
+                </div>
+                <input id="f-thresh" type="range" min="0.10" max="0.50" step="0.05" value="0.25" />
+                <div class="slider-ends">
+                  <span data-i18n="end_kws_easy">More sensitive 0.10</span>
+                  <span data-i18n="end_kws_strict">Stricter 0.50</span>
+                </div>
+              </div>
+              <div class="slider-block" style="margin-top: 16px;">
+                <div class="slider-head">
+                  <label class="slider-label" for="f-score" data-i18n="lbl_kws_score">Keyword Weight</label>
+                  <span id="v-score" class="readout">1.0</span>
+                </div>
+                <input id="f-score" type="range" min="0.5" max="3.0" step="0.1" value="1.0" />
+                <div class="slider-ends">
+                  <span data-i18n="end_score_low">Conservative 0.5</span>
+                  <span data-i18n="end_score_rec">Recommended 1.0</span>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 3: Settings & Diagnostics -->
+      <section id="panel-settings" class="panel" role="tabpanel">
+        <div class="group">
+          <div class="group-title" data-i18n="grp_chat">New Chat After Wake</div>
+          <div class="form-row">
+            <label class="row-label" for="f-project" data-i18n="lbl_project">Project</label>
+            <div class="row-ctrl">
+              <select id="f-project"></select>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="row-label" for="f-model" data-i18n="lbl_model">Model</label>
+            <div class="row-ctrl">
+              <select id="f-model"></select>
+            </div>
+          </div>
+          <div id="effort-field" class="form-row">
+            <label class="row-label" for="f-effort" data-i18n="lbl_thinking">Thinking</label>
+            <div class="row-ctrl">
+              <select id="f-effort"></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title" data-i18n="grp_audio">Microphone &amp; Dictation</div>
+          <div class="form-row">
+            <label class="row-label" for="f-mic" data-i18n="lbl_mic">Microphone</label>
+            <div class="row-ctrl">
+              <select id="f-mic"></select>
+            </div>
+          </div>
+          <div class="slider-block">
+            <div class="slider-head">
+              <label class="slider-label" for="f-silence" data-i18n="lbl_silence">Auto-Send Pause</label>
+              <span id="v-silence" class="readout">1.8s</span>
+            </div>
+            <input id="f-silence" type="range" min="0.8" max="4.0" step="0.1" value="1.8" />
+            <div class="slider-ends">
+              <span data-i18n="end_fast_send">0.8s Faster</span>
+              <span data-i18n="end_long_pause">4.0s Longer pause</span>
+            </div>
+          </div>
+          <div class="slider-block">
+            <div class="slider-head">
+              <label class="slider-label" for="f-vol" data-i18n="lbl_volume">Alert Volume</label>
+              <span id="v-vol" class="readout">50%</span>
+            </div>
+            <input id="f-vol" type="range" min="0" max="1" step="0.05" value="0.5" />
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title" data-i18n="grp_interface">Interface</div>
+          <div class="form-row">
+            <label class="row-label" for="f-lang" data-i18n="lbl_language">Language</label>
+            <div class="row-ctrl">
+              <select id="f-lang">
+                <option value="auto">Auto (System)</option>
+                <option value="en">English</option>
+                <option value="zh">简体中文</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title" data-i18n="grp_diag">Diagnostics &amp; Activity</div>
+          <div class="diag-actions">
+            <button id="btn-check" class="btn-soft" type="button" data-i18n="btn_check">Check Environment</button>
+            <button id="btn-trigger" class="btn-soft" type="button" data-i18n="btn_trigger">Test Workflow (No Send)</button>
+          </div>
+          <div class="diag-hint" data-i18n="diag_hint">Verify permissions and microphone input, or rehearse opening dictation without sending a message.</div>
+
+          <div id="diag-box" class="diag-wrap">
+            <div class="diag-head">
+              <span data-i18n="diag_title">Check Results</span>
+              <button id="btn-close-diag" class="btn-text" type="button" data-i18n="btn_close">Hide</button>
+            </div>
+            <dl id="diag-list" class="diag-list"></dl>
+          </div>
+
+          <details id="logs-details" class="logs-details">
+            <summary class="logs-summary">
+              <span data-i18n="lbl_activity_log">Activity Log</span>
+              <button id="btn-refresh" class="btn-text" type="button" data-i18n="btn_refresh">Refresh</button>
+            </summary>
+            <div id="logs-box" class="logs-list"></div>
+          </details>
+
+          <div class="settings-footer">
+            <span class="footer-note" data-i18n="footer_autosave">Changes save automatically</span>
+            <button id="btn-save" class="btn-text" type="submit" data-i18n="btn_reload">Reload</button>
+          </div>
+        </div>
+      </section>
+    </form>
+  </div>
+
+  <script>
+    const token = new URLSearchParams(window.location.search).get('token') || '';
+    function apiFetch(path, opts = {}) {
+      if (window.sidecar && typeof window.sidecar.fetch === 'function') {
+        return window.sidecar.fetch(path, opts);
+      }
+      const headers = Object.assign({}, opts.headers || {});
+      if (token) headers['x-sidecar-token'] = token;
+      return fetch(path, Object.assign({}, opts, { headers }));
+    }
+
+    const I18N = {
+      en: {
+        tab_status: 'Status',
+        tab_wake: 'Wake',
+        tab_settings: 'Settings',
+        sub_connecting: 'Connecting to local voice service…',
+        btn_pause: 'Pause',
+        btn_start: 'Start',
+        btn_pausing: 'Pausing…',
+        btn_starting: 'Starting…',
+        btn_test_wake: 'Test Wake',
+        btn_stop_test: 'Stop Test',
+        title_test_wake: 'Checks wake detection with a chime only, without opening a chat',
+        btn_reset: 'Reset',
+        kv_mode: 'Wake Mode',
+        kv_hotkey: 'Hotkey',
+        kv_mic: 'Microphone',
+        kv_target: 'New Chat',
+        kv_perm: 'Permissions',
+        val_ax_required: 'Accessibility Required',
+        mode_badge_sample: 'Recorded Voice ({n})',
+        mode_badge_text: 'English Phrase',
+        hk_off: 'Off',
+        hk_unavailable: '{hk} (Unavailable)',
+        grp_triggers: 'Triggers',
+        lbl_voice_wake: 'Voice Wake',
+        lbl_global_hotkey: 'Global Hotkey',
+        lbl_hotkey: 'Hotkey',
+        btn_record_key: 'Record',
+        btn_press_key: 'Press keys…',
+        grp_recognition: 'Wake Recognition',
+        mode_text: 'English Phrase',
+        mode_sample: 'Recorded Voice',
+        mode_desc_text: 'Type any English wake phrase; use Recorded Voice for non-English or custom words.',
+        mode_desc_sample: 'Record your own voice samples for any language, accent, or custom word.',
+        lbl_wake_text: 'Wake Phrase',
+        lbl_wake_sample: 'Display Name',
+        ph_wake_sample: 'Display label only',
+        lbl_voice_samples: 'Voice Samples',
+        sample_count: '{n} samples',
+        sample_empty: 'No samples yet. Click "Record Sample" or "Import Audio" above.',
+        btn_rec_sample: 'Record Sample',
+        btn_recording_say: 'Speak wake word…',
+        btn_import_audio: 'Import Audio',
+        btn_importing: 'Importing…',
+        btn_clear: 'Clear',
+        tip_play: 'Play',
+        tip_delete: 'Delete',
+        lbl_match_strictness: 'Match Strictness',
+        end_loose: 'Loose 0.55',
+        end_strict: 'Strict 0.90',
+        lbl_aliases: 'Aliases',
+        ph_aliases: 'Optional, comma-separated',
+        lbl_sensitivity: 'Sensitivity',
+        preset_sensitive: 'Sensitive',
+        preset_balanced: 'Balanced',
+        preset_strict: 'Strict',
+        preset_custom: 'Custom',
+        desc_sensitive: 'Easier to trigger; works well for softer speech.',
+        desc_balanced: 'Recommended default balancing recall and false-wake prevention.',
+        desc_strict: 'Higher confidence gate to avoid background speech triggers.',
+        desc_custom: 'Custom settings (Threshold {t}, Weight {s})',
+        lbl_advanced: 'Advanced',
+        lbl_kws_thresh: 'Trigger Threshold',
+        end_kws_easy: 'More sensitive 0.10',
+        end_kws_strict: 'Stricter 0.50',
+        lbl_kws_score: 'Keyword Weight',
+        end_score_low: 'Conservative 0.5',
+        end_score_rec: 'Recommended 1.0',
+        tip_non_ascii: 'Non-English phrases require "Recorded Voice" mode above.',
+        tip_single_weight: 'High keyword weight on a single word can miss triggers; keep 1.0.',
+        tip_single_word: 'Single words can be harder to spot; add phonetic aliases or use "Recorded Voice".',
+        grp_chat: 'New Chat After Wake',
+        lbl_project: 'Project',
+        lbl_model: 'Model',
+        lbl_thinking: 'Thinking',
+        grp_audio: 'Microphone & Dictation',
+        lbl_mic: 'Microphone',
+        lbl_silence: 'Auto-Send Pause',
+        end_fast_send: '0.8s Faster',
+        end_long_pause: '4.0s Longer pause',
+        lbl_volume: 'Alert Volume',
+        grp_interface: 'Interface',
+        lbl_language: 'Language',
+        lang_auto: 'Auto (System)',
+        lang_en: 'English',
+        lang_zh: '简体中文',
+        grp_diag: 'Diagnostics & Activity',
+        btn_check: 'Check Environment',
+        btn_checking: 'Checking…',
+        btn_trigger: 'Test Workflow (No Send)',
+        btn_triggering: 'Triggering…',
+        diag_hint: 'Verify permissions and microphone input, or rehearse opening dictation without sending a message.',
+        diag_title: 'Check Results',
+        btn_close: 'Hide',
+        diag_loading: 'Checking permissions, microphone, and local speech engines…',
+        diag_failed: 'Check failed. Please verify the local service is running.',
+        diag_overall: 'Overall Status',
+        diag_all_ok: 'Ready',
+        diag_has_issue: 'Needs Attention',
+        diag_ax: 'Accessibility',
+        diag_ax_ok: 'Granted',
+        diag_ax_missing: 'Not Granted (Enable in System Settings)',
+        diag_mic: 'Active Mic',
+        diag_mic_live: 'Signal Detected',
+        diag_mic_quiet: 'Quiet / Check Input',
+        diag_engine: 'Speech Engine',
+        diag_engine_ok: 'Ready',
+        diag_engine_err: 'Not Ready',
+        diag_ui_model: 'Active UI Model',
+        lbl_activity_log: 'Activity Log',
+        btn_refresh: 'Refresh',
+        log_empty: 'No activity recorded yet',
+        footer_autosave: 'Changes save automatically',
+        btn_reload: 'Reload',
+        btn_reloading: 'Reloading…',
+        state_initializing: 'Starting',
+        state_listening: 'Listening',
+        state_wake_test: 'Testing Wake',
+        state_recording_sample: 'Recording Sample',
+        state_hotkey_only: 'Hotkey Only',
+        state_paused: 'Paused',
+        state_preparing: 'Opening Chat',
+        state_dictating: 'Dictating',
+        state_submitting: 'Sending',
+        state_cooldown: 'Cooldown',
+        state_switching: 'Switching…',
+        state_error: 'Service Error',
+        state_offline: 'Offline',
+        sub_wake_test: 'Detects wake phrase and chimes only, without opening a chat',
+        sub_paused_hk: 'Voice wake paused · press {hk} anytime for dictation',
+        sub_paused_nohk: 'Voice wake and global hotkey are both paused',
+        sub_listen_hk: 'Say "{phrase}" or press {hk} to start a new chat',
+        sub_listen_nohk: 'Say "{phrase}" to start a new chat',
+        sub_rec_sample: 'Speak your wake phrase clearly once into the microphone',
+        sub_hk_only: 'Voice wake off · press {hk} to start a new chat',
+        sub_preparing: 'Focusing Antigravity and creating a new chat…',
+        sub_dictating: 'Listening to your dictation; pauses automatically send',
+        sub_submitting: 'Sending dictated message to Antigravity…',
+        sub_cooldown: 'Submitted; returning to listening shortly',
+        sub_switching: 'Updating listener state…',
+        sub_err_detail: 'Error: {err}',
+        sub_err_generic: 'Service issue; run Settings → Check Environment',
+        sub_offline: 'Unable to reach local Voice Wake service',
+        test_hits: '{hits} hits',
+        test_score_readout: 'Last score {score} ({status}) · Threshold {thresh}',
+        test_hit_yes: 'Matched',
+        test_hit_no: 'Below threshold',
+        test_say_sample: 'Say "{phrase}" to test match score',
+        test_say_kws: 'Say "{phrase}" to test · Sensitivity: {preset}',
+        msg_need_mod: 'Include Ctrl, Option, Cmd, or Shift',
+        msg_speak_now: 'Speak into the microphone…',
+        msg_no_speech: 'No speech detected, please try again',
+        msg_rec_failed: 'Recording failed',
+        msg_rec_ok: 'Recorded sample ({sec}s)',
+        msg_import_err: 'Import failed: {err}',
+        msg_import_ok: 'Imported {n} sample(s)',
+        msg_cleared: 'All samples cleared',
+        msg_switch_err: 'Switch failed: {err}',
+        msg_paused_hk: 'Voice listening paused · {hk} still active',
+        msg_paused: 'Voice listening paused',
+        msg_hk_resumed: 'Hotkey listening active ({hk})',
+        msg_resumed: 'Listening for "{phrase}"',
+        msg_test_err: 'Test mode failed: {err}',
+        msg_test_on: 'Test mode active (chime only)',
+        msg_test_off: 'Returned to normal wake mode',
+        msg_trigger_ok: 'Test workflow started (will not send)',
+        msg_trigger_err: 'Trigger failed: {err}',
+        msg_refreshed: 'Refreshed',
+        msg_wake_empty: 'Wake phrase cannot be empty',
+        msg_saving: 'Saving…',
+        msg_saved: 'Saved',
+        msg_save_err: 'Save failed',
+        opt_model_orch: 'Orchestrator (Global Default)',
+        opt_model_follow: 'Follow active model',
+        opt_eff_default: 'Default',
+        opt_eff_follow: 'Follow active model',
+        opt_eff_orch: 'Use global setting',
+        opt_mic_builtin: 'Built-in Mic (Protects Bluetooth Audio)',
+        opt_mic_default: 'System Default Input',
+        opt_mic_tag: ' [Built-in]',
+        ev_daemon_started: 'Service Started',
+        ev_daemon_stopped: 'Service Stopped',
+        ev_web_ui_started: 'Control Panel Ready',
+        ev_listening: 'Listening Started',
+        ev_hotkey_registered: 'Hotkey Registered',
+        ev_hotkey_triggered: 'Hotkey Triggered',
+        ev_pause_toggled: 'Pause Toggled',
+        ev_wake_detected: 'Wake Phrase Detected',
+        ev_wake_test_toggled: 'Wake Test Toggled',
+        ev_wake_test_hit: 'Wake Test Matched',
+        ev_sample_recorded: 'Sample Recorded',
+        ev_sample_imported: 'Sample Imported',
+        ev_sample_deleted: 'Sample Deleted',
+        ev_config_updated: 'Settings Saved',
+        ev_prepare_result: 'New Chat Prepared',
+        ev_start_dictation_result: 'Dictation Started',
+        ev_dictation_outcome: 'Dictation Finished',
+        ev_signal_received: 'Shutdown Signal',
+        ev_error: 'Error',
+      },
+      zh: {
+        tab_status: '状态',
+        tab_wake: '唤醒',
+        tab_settings: '设置',
+        sub_connecting: '正在连接本地语音服务…',
+        btn_pause: '暂停监听',
+        btn_start: '开始监听',
+        btn_pausing: '暂停中…',
+        btn_starting: '启动中…',
+        btn_test_wake: '测试唤醒',
+        btn_stop_test: '退出测试',
+        title_test_wake: '仅检测是否命中唤醒词并响铃，不会新建对话',
+        btn_reset: '清零',
+        kv_mode: '唤醒方式',
+        kv_hotkey: '快捷键',
+        kv_mic: '麦克风',
+        kv_target: '新建对话',
+        kv_perm: '系统权限',
+        val_ax_required: '需开启辅助功能',
+        mode_badge_sample: '录制的声音（{n} 条）',
+        mode_badge_text: '英文文本词',
+        hk_off: '未开启',
+        hk_unavailable: '{hk}（未就绪）',
+        grp_triggers: '触发方式',
+        lbl_voice_wake: '语音唤醒',
+        lbl_global_hotkey: '全局快捷键',
+        lbl_hotkey: '快捷键',
+        btn_record_key: '录制',
+        btn_press_key: '请按键…',
+        grp_recognition: '唤醒词识别',
+        mode_text: '英文文本词',
+        mode_sample: '录制的声音',
+        mode_desc_text: '直接输入英文短语即可唤醒；中文或自造词请改用「录制的声音」。',
+        mode_desc_sample: '录制自己的发音作为匹配样本，支持任意语言或自定义口令。',
+        lbl_wake_text: '唤醒词',
+        lbl_wake_sample: '显示名称',
+        ph_wake_sample: '仅用于界面显示',
+        lbl_voice_samples: '语音样本',
+        sample_count: '{n} 条',
+        sample_empty: '暂无样本，点击上方「录制样本」或「导入音频」',
+        btn_rec_sample: '录制样本',
+        btn_recording_say: '请说出唤醒词…',
+        btn_import_audio: '导入音频',
+        btn_importing: '导入中…',
+        btn_clear: '清空',
+        tip_play: '试听',
+        tip_delete: '删除',
+        lbl_match_strictness: '匹配严格度',
+        end_loose: '宽松 0.55',
+        end_strict: '严格 0.90',
+        lbl_aliases: '近音备选',
+        ph_aliases: '可选，逗号分隔',
+        lbl_sensitivity: '触发灵敏度',
+        preset_sensitive: '高灵敏',
+        preset_balanced: '平衡',
+        preset_strict: '严格',
+        preset_custom: '自定义',
+        desc_sensitive: '更容易命中，适合轻声或快速唤醒',
+        desc_balanced: '推荐默认，兼顾唤醒成功率与防误触',
+        desc_strict: '提高门槛，减少环境声误触发',
+        desc_custom: '自定义参数（触发阈值 {t}，权重 {s}）',
+        lbl_advanced: '高级参数',
+        lbl_kws_thresh: '触发阈值',
+        end_kws_easy: '更易触发 0.10',
+        end_kws_strict: '更严格 0.50',
+        lbl_kws_score: '关键词权重',
+        end_score_low: '保守 0.5',
+        end_score_rec: '推荐 1.0',
+        tip_non_ascii: '非英文唤醒词请切换上方「录制的声音」模式',
+        tip_single_weight: '单词唤醒词权重过高容易漏触发，建议保持 1.0',
+        tip_single_word: '单词较短时容易漏识别，可补充近音备选或改用「录制的声音」',
+        grp_chat: '唤醒后新建对话',
+        lbl_project: '目标项目',
+        lbl_model: '默认模型',
+        lbl_thinking: '思考深度',
+        grp_audio: '麦克风与听写',
+        lbl_mic: '输入麦克风',
+        lbl_silence: '说完自动发送',
+        end_fast_send: '0.8s 更快发送',
+        end_long_pause: '4.0s 允许长停顿',
+        lbl_volume: '提示音量',
+        grp_interface: '界面与语言',
+        lbl_language: '显示语言',
+        lang_auto: '跟随系统（Auto）',
+        lang_en: 'English',
+        lang_zh: '简体中文',
+        grp_diag: '排查与记录',
+        btn_check: '环境检查',
+        btn_checking: '检查中…',
+        btn_trigger: '测试唤起（不发送）',
+        btn_triggering: '唤起中…',
+        diag_hint: '用于排查权限、收音情况，或演练一次完整听写流程（不会发送消息）。',
+        diag_title: '检查结果',
+        btn_close: '收起',
+        diag_loading: '正在检查权限、麦克风与本地语音引擎…',
+        diag_failed: '检查请求失败，请确认本地服务正常运行。',
+        diag_overall: '整体状态',
+        diag_all_ok: '全部正常',
+        diag_has_issue: '发现异常项',
+        diag_ax: '辅助功能',
+        diag_ax_ok: '已授权',
+        diag_ax_missing: '未授权（请在系统设置中开启）',
+        diag_mic: '当前麦克风',
+        diag_mic_live: '收音正常',
+        diag_mic_quiet: '当前较安静',
+        diag_engine: '语音引擎',
+        diag_engine_ok: '已就绪',
+        diag_engine_err: '未就绪',
+        diag_ui_model: '界面当前模型',
+        lbl_activity_log: '运行记录',
+        btn_refresh: '刷新',
+        log_empty: '暂无运行记录',
+        footer_autosave: '修改自动保存并生效',
+        btn_reload: '重新加载',
+        btn_reloading: '重载中…',
+        state_initializing: '正在启动',
+        state_listening: '正在监听',
+        state_wake_test: '唤醒测试中',
+        state_recording_sample: '正在录制样本',
+        state_hotkey_only: '仅快捷键可用',
+        state_paused: '已暂停',
+        state_preparing: '正在新建对话',
+        state_dictating: '正在听写',
+        state_submitting: '正在发送',
+        state_cooldown: '刚完成发送',
+        state_switching: '正在切换…',
+        state_error: '服务异常',
+        state_offline: '已离线',
+        sub_wake_test: '只检测是否命中唤醒词并响铃，不会新建对话',
+        sub_paused_hk: '语音监听已暂停，仍可按 {hk} 唤起听写',
+        sub_paused_nohk: '语音唤醒与快捷键均已暂停',
+        sub_listen_hk: '说出 “{phrase}” 或按 {hk}，即可新建对话并听写',
+        sub_listen_nohk: '说出 “{phrase}”，即可新建对话并听写',
+        sub_rec_sample: '请对着麦克风清晰说出 1 次唤醒词',
+        sub_hk_only: '语音唤醒未开启，按 {hk} 新建对话并听写',
+        sub_preparing: '正在唤醒窗口并创建新对话…',
+        sub_dictating: '正在语音听写，说完停顿后会自动发送',
+        sub_submitting: '正在将听写内容发送给 Antigravity…',
+        sub_cooldown: '刚完成发送，即将恢复监听',
+        sub_switching: '正在切换监听状态…',
+        sub_err_detail: '异常：{err}',
+        sub_err_generic: '运行异常，可在「设置 → 环境检查」排查',
+        sub_offline: '暂时无法连接到本地语音服务',
+        test_hits: '已命中 {hits} 次',
+        test_score_readout: '最近匹配度 {score}（{status}）· 当前阈值 {thresh}',
+        test_hit_yes: '已命中',
+        test_hit_no: '未达到阈值',
+        test_say_sample: '请说出 “{phrase}” 测试匹配效果',
+        test_say_kws: '请说出 “{phrase}” 进行测试 · 灵敏度：{preset}',
+        msg_need_mod: '请搭配 Ctrl / Option / Cmd 等修饰键',
+        msg_speak_now: '请对着麦克风说话…',
+        msg_no_speech: '未检测到说话声，请再试一次',
+        msg_rec_failed: '录制失败',
+        msg_rec_ok: '已录制样本（{sec}s）',
+        msg_import_err: '导入失败：{err}',
+        msg_import_ok: '已导入 {n} 条样本',
+        msg_cleared: '已清空所有样本',
+        msg_switch_err: '切换失败：{err}',
+        msg_paused_hk: '已暂停语音监听，仍可按 {hk}',
+        msg_paused: '已暂停语音监听',
+        msg_hk_resumed: '已开启快捷键唤醒（{hk}）',
+        msg_resumed: '已恢复监听 “{phrase}”',
+        msg_test_err: '切换测试失败：{err}',
+        msg_test_on: '已进入测试模式，命中仅响铃计数',
+        msg_test_off: '已退出测试，恢复正常唤醒',
+        msg_trigger_ok: '已唤起演练（不会发送）',
+        msg_trigger_err: '唤起失败：{err}',
+        msg_refreshed: '已刷新',
+        msg_wake_empty: '唤醒词不能为空',
+        msg_saving: '保存中…',
+        msg_saved: '已自动保存',
+        msg_save_err: '保存失败',
+        opt_model_orch: 'Orchestrator（全局默认）',
+        opt_model_follow: '跟随当前已选模型',
+        opt_eff_default: '默认',
+        opt_eff_follow: '跟随当前模型',
+        opt_eff_orch: '沿用全局设置',
+        opt_mic_builtin: '内置麦克风（保护蓝牙音质）',
+        opt_mic_default: '系统默认输入',
+        opt_mic_tag: ' [内置]',
+        ev_daemon_started: '服务启动',
+        ev_daemon_stopped: '服务停止',
+        ev_web_ui_started: '面板端口就绪',
+        ev_listening: '开始监听',
+        ev_hotkey_registered: '快捷键已就绪',
+        ev_hotkey_triggered: '快捷键唤起',
+        ev_pause_toggled: '切换监听状态',
+        ev_wake_detected: '识别到唤醒词',
+        ev_wake_test_toggled: '切换唤醒测试',
+        ev_wake_test_hit: '测试命中唤醒词',
+        ev_sample_recorded: '录入语音样本',
+        ev_sample_imported: '导入语音样本',
+        ev_sample_deleted: '删除语音样本',
+        ev_config_updated: '保存配置更改',
+        ev_prepare_result: '新建目标对话',
+        ev_start_dictation_result: '开始语音听写',
+        ev_dictation_outcome: '完成一次听写',
+        ev_signal_received: '收到退出信号',
+        ev_error: '发生异常',
+      },
+    };
+
+    function detectBrowserLang() {
+      const langs = (Array.isArray(navigator.languages) && navigator.languages.length)
+        ? navigator.languages
+        : [navigator.language || 'en'];
+      const primary = String(langs[0] || 'en').trim().toLowerCase();
+      return primary.startsWith('zh') ? 'zh' : 'en';
+    }
+
+    let uiLanguagePref = 'auto';
+    let backendSystemLang = '';
+    let currentLang = detectBrowserLang();
+
+    function resolveEffectiveLang() {
+      if (uiLanguagePref === 'zh') return 'zh';
+      if (uiLanguagePref === 'en') return 'en';
+      if (backendSystemLang === 'zh' || backendSystemLang === 'en') return backendSystemLang;
+      return detectBrowserLang();
+    }
+
+    function t(key, vars = {}) {
+      const dict = I18N[currentLang] || I18N.en;
+      let str = dict[key] !== undefined ? dict[key] : (I18N.en[key] !== undefined ? I18N.en[key] : key);
+      for (const [k, v] of Object.entries(vars)) {
+        str = str.replaceAll(`{${k}}`, String(v));
+      }
+      return str;
+    }
+
+    const PRESETS = [
+      { id: 'sensitive', labelKey: 'preset_sensitive', descKey: 'desc_sensitive', thresh: 0.15, score: 1.0 },
+      { id: 'balanced', labelKey: 'preset_balanced', descKey: 'desc_balanced', thresh: 0.25, score: 1.0 },
+      { id: 'strict', labelKey: 'preset_strict', descKey: 'desc_strict', thresh: 0.35, score: 1.0 },
+    ];
+
+    let activeTab = 'status';
+    let formDirty = false;
+    let toggleBusy = false;
+    let wakeTestActive = false;
+    let selectedWakeMode = 'text';
+    let currentSampleCount = 0;
+    let liveWakeMode = 'text';
+    let lastSampleScore = 0;
+    let lastSampleHit = false;
+    let liveState = 'initializing';
+    let livePaused = false;
+    let liveConfig = {};
+    let liveLastError = '';
+    let initialUiMtime = 0;
+
+    let lastStatusData = null;
+    let lastSamplesList = [];
+    let lastDiagData = null;
+    let lastLogsList = null;
+
+    let pollTimer = null;
+    let feedbackTimer = null;
+    let feedbackOverride = null;
+    let toastTimer = null;
+    let autoSaveTimer = null;
+    let saveInFlight = false;
+    let saveQueued = false;
+    let lastSavedJson = '';
+    let recordingHotkey = false;
+
+    const form = document.getElementById('cfg-form');
+    const btnPause = document.getElementById('btn-pause');
+    const headerDot = document.getElementById('header-dot');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const heroSub = document.getElementById('hero-sub');
+    const btnWakeTest = document.getElementById('btn-wake-test');
+    const wakeTestBar = document.getElementById('wake-test-bar');
+    const logsDetails = document.getElementById('logs-details');
+
+    function applyStaticI18n() {
+      document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        el.textContent = t(el.dataset.i18n);
+      });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        el.placeholder = t(el.dataset.i18nPlaceholder);
+      });
+      document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        el.title = t(el.dataset.i18nTitle);
+      });
+      const langSel = document.getElementById('f-lang');
+      if (langSel && langSel.options.length >= 3) {
+        langSel.options[0].textContent = t('lang_auto');
+        langSel.options[1].textContent = t('lang_en');
+        langSel.options[2].textContent = t('lang_zh');
+      }
+      if (!recordingHotkey) {
+        document.getElementById('btn-rec-hotkey').textContent = t('btn_record_key');
+      }
+    }
+
+    function applyI18n(forceRerender = false) {
+      const nextLang = resolveEffectiveLang();
+      const changed = nextLang !== currentLang;
+      currentLang = nextLang;
+      if (!changed && !forceRerender) return;
+      applyStaticI18n();
+      applyWakeModeUI(selectedWakeMode);
+      syncSliderLabels();
+      syncPresetHighlight();
+      if (lastStatusData) renderStatusSnapshot(lastStatusData, false);
+      renderSamplesList(lastSamplesList);
+      if (lastDiagData) renderDiagResult(lastDiagData);
+      if (lastLogsList) renderLogsList(lastLogsList);
+    }
+
+    function switchTab(name) {
+      activeTab = name;
+      document.querySelectorAll('.nav-tab').forEach(btn => {
+        const on = btn.dataset.tab === name;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      document.querySelectorAll('.panel').forEach(p => {
+        p.classList.toggle('active', p.id === `panel-${name}`);
+      });
+      if (name === 'wake') loadSamples();
+      if (name === 'settings' && logsDetails.open) loadLogs();
+    }
+
+    document.querySelectorAll('.nav-tab').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    function setToast(msg, level = '') {
+      const el = document.getElementById('save-toast');
+      if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+      if (!msg) {
+        el.textContent = '';
+        el.className = 'toast';
+        return;
+      }
+      el.textContent = msg;
+      el.className = 'toast show' + (level ? ' ' + level : '');
+      toastTimer = setTimeout(() => {
+        if (el.textContent === msg) {
+          el.classList.remove('show');
+        }
+      }, 2800);
+    }
+
+    function computeDefaultSubtitle() {
+      const phrase = liveConfig.wake_phrase || 'HEY GRAVITY';
+      const hk = liveConfig.hotkey || 'ctrl+g';
+      const hkOn = liveConfig.hotkey_enabled !== false;
+
+      if (wakeTestActive && !livePaused) {
+        return t('sub_wake_test');
+      }
+      if (livePaused) {
+        return hkOn ? t('sub_paused_hk', { hk }) : t('sub_paused_nohk');
+      }
+      switch (liveState) {
+        case 'listening':
+          return hkOn ? t('sub_listen_hk', { phrase, hk }) : t('sub_listen_nohk', { phrase });
+        case 'recording_sample':
+          return t('sub_rec_sample');
+        case 'hotkey_only':
+          return t('sub_hk_only', { hk });
+        case 'preparing':
+          return t('sub_preparing');
+        case 'dictating':
+          return t('sub_dictating');
+        case 'submitting':
+          return t('sub_submitting');
+        case 'cooldown':
+          return t('sub_cooldown');
+        case 'switching':
+          return t('sub_switching');
+        case 'error':
+          return liveLastError ? t('sub_err_detail', { err: liveLastError }) : t('sub_err_generic');
+        default:
+          return t('sub_connecting');
+      }
+    }
+
+    function renderHeroSubtitle() {
+      if (feedbackOverride) {
+        heroSub.textContent = feedbackOverride.msg;
+        heroSub.className = 'hero-sub' + (feedbackOverride.level ? ' ' + feedbackOverride.level : '');
+        return;
+      }
+      heroSub.textContent = computeDefaultSubtitle();
+      heroSub.className = liveState === 'error' ? 'hero-sub err' : 'hero-sub';
+    }
+
+    function showFeedback(msg, level = 'info', durationMs = 3200) {
+      if (feedbackTimer) { clearTimeout(feedbackTimer); feedbackTimer = null; }
+      feedbackOverride = { msg, level };
+      renderHeroSubtitle();
+      setToast(msg, level === 'info' ? '' : level);
+      if (durationMs > 0) {
+        feedbackTimer = setTimeout(() => {
+          feedbackOverride = null;
+          feedbackTimer = null;
+          renderHeroSubtitle();
+        }, durationMs);
+      }
+    }
+
+    function syncHotkeyRowDim() {
+      const enabled = document.getElementById('f-hotkey-en').checked;
+      document.getElementById('row-hotkey').classList.toggle('dimmed', !enabled);
+    }
+    document.getElementById('f-hotkey-en').addEventListener('change', syncHotkeyRowDim);
+
+    function applyWakeModeUI(mode) {
+      selectedWakeMode = mode === 'voice_sample' ? 'voice_sample' : 'text';
+      const isSample = selectedWakeMode === 'voice_sample';
+      document.getElementById('tab-mode-text').classList.toggle('active', !isSample);
+      document.getElementById('tab-mode-sample').classList.toggle('active', isSample);
+      document.getElementById('voice-sample-section').classList.toggle('hidden', !isSample);
+      document.getElementById('text-kws-section').classList.toggle('hidden', isSample);
+      document.getElementById('lbl-wake').textContent = isSample ? t('lbl_wake_sample') : t('lbl_wake_text');
+      document.getElementById('f-wake').placeholder = isSample ? t('ph_wake_sample') : 'HEY GRAVITY';
+      document.getElementById('mode-desc').textContent = isSample ? t('mode_desc_sample') : t('mode_desc_text');
+      syncWakePhraseTip();
+    }
+
+    document.getElementById('tab-mode-text').addEventListener('click', () => {
+      applyWakeModeUI('text');
+      scheduleAutoSave(60);
+    });
+    document.getElementById('tab-mode-sample').addEventListener('click', () => {
+      applyWakeModeUI('voice_sample');
+      loadSamples();
+      scheduleAutoSave(60);
+    });
+
+    function syncWakePhraseTip() {
+      const tip = document.getElementById('wake-phrase-tip');
+      if (selectedWakeMode === 'voice_sample') {
+        tip.textContent = '';
+        tip.className = 'phrase-tip';
+        return;
+      }
+      const phrase = (document.getElementById('f-wake').value || '').trim();
+      const aliases = (document.getElementById('f-aliases').value || '').trim();
+      const score = Number(document.getElementById('f-score').value || 1.0);
+      if (!phrase) {
+        tip.textContent = '';
+        tip.className = 'phrase-tip';
+        return;
+      }
+      if (/[^\x00-\x7F]/.test(phrase)) {
+        tip.className = 'phrase-tip show warn';
+        tip.textContent = t('tip_non_ascii');
+        return;
+      }
+      const words = phrase.split(/\s+/).filter(Boolean);
+      if (words.length === 1) {
+        if (score > 1.25) {
+          tip.className = 'phrase-tip show warn';
+          tip.textContent = t('tip_single_weight');
+        } else if (!aliases) {
+          tip.className = 'phrase-tip show';
+          tip.textContent = t('tip_single_word');
+        } else {
+          tip.textContent = '';
+          tip.className = 'phrase-tip';
+        }
+        return;
+      }
+      tip.textContent = '';
+      tip.className = 'phrase-tip';
+    }
+
+    form.addEventListener('input', (e) => {
+      const target = e.target;
+      if (target && target.id === 'file-import-sample') return;
+      syncSliderLabels();
+      syncPresetHighlight();
+      syncWakePhraseTip();
+      if (target && target.type === 'range') {
+        scheduleAutoSave(350);
+      } else if (target && target.type === 'text') {
+        scheduleAutoSave(650);
+      } else {
+        scheduleAutoSave(250);
+      }
+    });
+
+    form.addEventListener('change', (e) => {
+      const target = e.target;
+      if (target && (target.id === 'file-import-sample' || target.id === 'f-model' || target.id === 'f-lang')) return;
+      syncPresetHighlight();
+      syncWakePhraseTip();
+      scheduleAutoSave(60);
+    });
+
+    document.getElementById('f-lang').addEventListener('change', () => {
+      uiLanguagePref = document.getElementById('f-lang').value || 'auto';
+      applyI18n(true);
+      scheduleAutoSave(60);
+    });
+
+    function syncSliderLabels() {
+      document.getElementById('v-silence').textContent = Number(document.getElementById('f-silence').value).toFixed(1) + 's';
+      document.getElementById('v-thresh').textContent = Number(document.getElementById('f-thresh').value).toFixed(2);
+      document.getElementById('v-score').textContent = Number(document.getElementById('f-score').value).toFixed(1);
+      document.getElementById('v-sample-thresh').textContent = Number(document.getElementById('f-sample-thresh').value).toFixed(2);
+      document.getElementById('v-vol').textContent = Math.round(Number(document.getElementById('f-vol').value) * 100) + '%';
+    }
+
+    function getPresetMeta(thresh, score) {
+      const th = Number(thresh ?? 0.25);
+      const sc = Number(score ?? 1.0);
+      for (const p of PRESETS) {
+        if (Math.abs(th - p.thresh) < 0.005 && Math.abs(sc - p.score) < 0.05) {
+          return p;
+        }
+      }
+      return null;
+    }
+
+    function syncPresetHighlight() {
+      const th = Number(document.getElementById('f-thresh').value);
+      const sc = Number(document.getElementById('f-score').value);
+      const matched = getPresetMeta(th, sc);
+      document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.classList.toggle('active', Boolean(matched && btn.dataset.preset === matched.id));
+      });
+      const badge = document.getElementById('preset-badge');
+      const desc = document.getElementById('preset-desc');
+      if (matched) {
+        badge.textContent = t(matched.labelKey);
+        desc.textContent = t(matched.descKey);
+      } else {
+        badge.textContent = t('preset_custom');
+        desc.textContent = t('desc_custom', { t: th.toFixed(2), s: sc.toFixed(1) });
+      }
+    }
+
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById('f-thresh').value = btn.dataset.thresh;
+        document.getElementById('f-score').value = btn.dataset.score;
+        syncSliderLabels();
+        syncPresetHighlight();
+        syncWakePhraseTip();
+        scheduleAutoSave(60);
+      });
+    });
+
+    function applyPauseVisuals(paused, state, testMode) {
+      livePaused = Boolean(paused);
+      const effectiveState = testMode && !paused ? 'wake_test' : (state || (paused ? 'paused' : 'listening'));
+      liveState = effectiveState;
+      headerDot.className = 'dot ' + effectiveState;
+      statusDot.className = 'dot dot-lg ' + effectiveState;
+      statusText.textContent = t('state_' + effectiveState);
+      if (!toggleBusy) {
+        if (paused) {
+          btnPause.className = 'btn-state-start';
+          btnPause.textContent = t('btn_start');
+        } else {
+          btnPause.className = 'btn-state-pause';
+          btnPause.textContent = t('btn_pause');
+        }
+        btnPause.disabled = false;
+      }
+      renderHeroSubtitle();
+    }
+
+    function applyWakeTestVisuals(active, hits, lastTs, lastKw, thresh, score, mode, sampleThresh, sScore, sHit, sCount) {
+      wakeTestActive = Boolean(active);
+      const phrase = liveConfig.wake_phrase || 'HEY GRAVITY';
+      if (wakeTestActive) {
+        btnWakeTest.className = 'btn-active-test';
+        btnWakeTest.textContent = t('btn_stop_test');
+        wakeTestBar.classList.add('show');
+        const tsPart = lastTs ? ` · ${lastTs}` : '';
+        document.getElementById('wake-test-summary').textContent = t('test_hits', { hits: hits || 0 }) + tsPart;
+        if ((mode || liveWakeMode) === 'voice_sample') {
+          const stVal = Number(sampleThresh ?? 0.72).toFixed(2);
+          const scPart = (sScore && sScore > 0)
+            ? t('test_score_readout', {
+                score: Number(sScore).toFixed(2),
+                status: sHit ? t('test_hit_yes') : t('test_hit_no'),
+                thresh: stVal,
+              })
+            : t('test_say_sample', { phrase });
+          document.getElementById('wake-test-sub').textContent = scPart;
+        } else {
+          const matched = getPresetMeta(thresh, score);
+          const presetName = matched ? t(matched.labelKey) : t('preset_custom');
+          document.getElementById('wake-test-sub').textContent = t('test_say_kws', { phrase, preset: presetName });
+        }
+      } else {
+        btnWakeTest.className = '';
+        btnWakeTest.textContent = t('btn_test_wake');
+        wakeTestBar.classList.remove('show');
+      }
+      schedulePoll();
+    }
+
+    function schedulePoll() {
+      const interval = wakeTestActive ? 1000 : 2500;
+      if (pollTimer && pollTimer._interval === interval) return;
+      if (pollTimer) clearInterval(pollTimer.id);
+      const id = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          loadStatus(false);
+          if (logsDetails.open) loadLogs();
+        }
+      }, interval);
+      pollTimer = { id, _interval: interval };
+    }
+
+    // Hotkey capture
+    const CODE_KEY_MAP = {
+      Space: 'space', Enter: 'return', Tab: 'tab', Backquote: '`',
+      Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+      Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+    };
+    function codeToKey(code) {
+      if (code.startsWith('Key') && code.length === 4) return code.slice(3).toLowerCase();
+      if (code.startsWith('Digit') && code.length === 6) return code.slice(5);
+      if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();
+      return CODE_KEY_MAP[code] || null;
+    }
+    const recBtn = document.getElementById('btn-rec-hotkey');
+    const hotkeyInput = document.getElementById('f-hotkey');
+
+    function stopHotkeyRec() {
+      recordingHotkey = false;
+      recBtn.textContent = t('btn_record_key');
+      recBtn.className = 'btn-soft';
+      window.removeEventListener('keydown', onHotkeyKeyDown, true);
+    }
+
+    function onHotkeyKeyDown(e) {
+      if (!recordingHotkey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (e.code === 'Escape') { stopHotkeyRec(); return; }
+      const key = codeToKey(e.code);
+      if (!key) return;
+      const mods = [];
+      if (e.ctrlKey) mods.push('ctrl');
+      if (e.altKey) mods.push('option');
+      if (e.shiftKey) mods.push('shift');
+      if (e.metaKey) mods.push('cmd');
+      const isFn = /^f\d+$/.test(key);
+      if (mods.length === 0 && !isFn) {
+        setToast(t('msg_need_mod'), 'warn');
+        return;
+      }
+      hotkeyInput.value = [...mods, key].join('+');
+      stopHotkeyRec();
+      scheduleAutoSave(60);
+    }
+
+    recBtn.addEventListener('click', () => {
+      if (recordingHotkey) { stopHotkeyRec(); return; }
+      recordingHotkey = true;
+      recBtn.textContent = t('btn_press_key');
+      recBtn.className = 'btn-soft recording';
+      window.addEventListener('keydown', onHotkeyKeyDown, true);
+    });
+
+    function populateSelect(sel, options, currentVal) {
+      const prev = sel.value;
+      sel.innerHTML = '';
+      for (const opt of options) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.label;
+        sel.appendChild(o);
+      }
+      const target = (currentVal !== undefined && currentVal !== null) ? String(currentVal) : prev;
+      if (target !== '' && !options.some(o => o.value === target)) {
+        const extra = document.createElement('option');
+        extra.value = target;
+        extra.textContent = target;
+        sel.appendChild(extra);
+      }
+      sel.value = target;
+    }
+
+    let cachedModels = [
+      { value: 'Orchestrator', label: 'Orchestrator', efforts: [''] },
+      { value: 'Gemini 4 Neon', label: 'Gemini 4 Neon', efforts: ['', 'Low', 'Medium', 'High', 'Extra High'] },
+      { value: 'Gemini 4 Carbon', label: 'Gemini 4 Carbon', efforts: ['', 'Low', 'Medium', 'High'] },
+      { value: 'Gemini 4 Hydrogen', label: 'Gemini 4 Hydrogen', efforts: ['', 'Low', 'Medium', 'High', 'Extra High'] },
+      { value: 'Claude Opus 5.5', label: 'Claude Opus 5.5', efforts: ['', 'Low', 'Medium', 'High'] },
+      { value: 'Claude Sonnet 5.5', label: 'Claude Sonnet 5.5', efforts: ['', 'Low', 'Medium', 'High'] },
+      { value: '', label: 'Follow active model', efforts: [''] },
+    ];
+
+    function localizedModelOptions() {
+      return cachedModels.map(m => {
+        if (m.value === 'Orchestrator') return Object.assign({}, m, { label: t('opt_model_orch') });
+        if (m.value === '') return Object.assign({}, m, { label: t('opt_model_follow') });
+        return m;
+      });
+    }
+
+    function effortLabel(val) {
+      if (val === '') return t('opt_eff_default');
+      if (currentLang !== 'zh') return val;
+      const map = { Low: 'Low（低）', Medium: 'Medium（中）', High: 'High（高）', 'Extra High': 'Extra High（极高）' };
+      return map[val] || val;
+    }
+
+    function syncEffortOptions(preferredEffort) {
+      const modelVal = document.getElementById('f-model').value;
+      const effSel = document.getElementById('f-effort');
+      const curEffort = preferredEffort !== undefined ? String(preferredEffort) : effSel.value;
+      const meta = cachedModels.find(m => m.value === modelVal);
+      const allowed = meta?.efforts || ['', 'Low', 'Medium', 'High'];
+
+      if (modelVal === '') {
+        populateSelect(effSel, [{ value: '', label: t('opt_eff_follow') }], '');
+        effSel.disabled = true;
+        return;
+      }
+      if (modelVal === 'Orchestrator' || (allowed.length === 1 && allowed[0] === '')) {
+        populateSelect(effSel, [{ value: '', label: t('opt_eff_orch') }], '');
+        effSel.disabled = true;
+        return;
+      }
+
+      effSel.disabled = false;
+      const opts = allowed.map(e => ({ value: e, label: effortLabel(e) }));
+      let nextVal = curEffort;
+      if (!allowed.includes(nextVal)) {
+        nextVal = allowed.includes('High') ? 'High' : '';
+      }
+      populateSelect(effSel, opts, nextVal);
+    }
+
+    document.getElementById('f-model').addEventListener('change', () => {
+      syncEffortOptions();
+      scheduleAutoSave(60);
+    });
+
+    async function playSampleAudio(id) {
+      try {
+        const res = await apiFetch('/api/samples/audio?id=' + encodeURIComponent(id));
+        if (!res.ok) return;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        await audio.play();
+      } catch {}
+    }
+
+    function renderSamplesList(list) {
+      lastSamplesList = Array.isArray(list) ? list : [];
+      currentSampleCount = lastSamplesList.length;
+      document.getElementById('sample-count-badge').textContent = t('sample_count', { n: currentSampleCount });
+      const box = document.getElementById('samples-list');
+      box.innerHTML = '';
+      if (lastSamplesList.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-note';
+        empty.textContent = t('sample_empty');
+        box.appendChild(empty);
+        return;
+      }
+      lastSamplesList.forEach((s, idx) => {
+        const row = document.createElement('div');
+        row.className = 'sample-row';
+        const info = document.createElement('span');
+        info.className = 'sample-info';
+        info.textContent = `#${idx + 1} · ${(s.duration_sec || 0).toFixed(2)}s${s.label ? ' · ' + s.label : ''}`;
+        const btns = document.createElement('div');
+        btns.className = 'sample-btns';
+        const playBtn = document.createElement('button');
+        playBtn.type = 'button';
+        playBtn.className = 'icon-btn';
+        playBtn.textContent = '▶';
+        playBtn.title = t('tip_play');
+        playBtn.addEventListener('click', () => playSampleAudio(s.id));
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'icon-btn';
+        delBtn.textContent = '×';
+        delBtn.title = t('tip_delete');
+        delBtn.addEventListener('click', async () => {
+          await apiFetch('/api/samples/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: s.id }),
+          });
+          await loadSamples();
+          loadStatus(false);
+        });
+        btns.appendChild(playBtn);
+        btns.appendChild(delBtn);
+        row.appendChild(info);
+        row.appendChild(btns);
+        box.appendChild(row);
+      });
+    }
+
+    async function loadSamples() {
+      try {
+        const res = await apiFetch('/api/samples');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderSamplesList(data.samples || []);
+      } catch {}
+    }
+
+    document.getElementById('btn-rec-sample').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-rec-sample');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>${t('btn_recording_say')}`;
+      setToast(t('msg_speak_now'));
+      try {
+        const res = await apiFetch('/api/samples/record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ max_sec: 2.8 }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          const msg = data.error === 'no_speech_detected' ? t('msg_no_speech') : (data.error || t('msg_rec_failed'));
+          setToast(msg, 'warn');
+        } else {
+          setToast(t('msg_rec_ok', { sec: data.sample.duration_sec }), 'ok');
+          await loadSamples();
+          loadStatus(false);
+        }
+      } catch (err) {
+        setToast(t('msg_rec_failed'), 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = t('btn_rec_sample');
+      }
+    });
+
+    const fileImport = document.getElementById('file-import-sample');
+    document.getElementById('btn-import-sample').addEventListener('click', () => fileImport.click());
+    fileImport.addEventListener('change', async () => {
+      const f = fileImport.files && fileImport.files[0];
+      if (!f) return;
+      const btn = document.getElementById('btn-import-sample');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>${t('btn_importing')}`;
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = () => reject(r.error);
+          r.readAsDataURL(f);
+        });
+        const res = await apiFetch('/api/samples/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: f.name, data_b64: String(dataUrl) }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          setToast(t('msg_import_err', { err: data.error || res.status }), 'err');
+        } else {
+          setToast(t('msg_import_ok', { n: data.added }), 'ok');
+          await loadSamples();
+          loadStatus(false);
+        }
+      } catch (err) {
+        setToast(t('msg_import_err', { err: String(err) }), 'err');
+      } finally {
+        fileImport.value = '';
+        btn.disabled = false;
+        btn.textContent = t('btn_import_audio');
+      }
+    });
+
+    document.getElementById('btn-clear-samples').addEventListener('click', async () => {
+      await apiFetch('/api/samples/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all: true }),
+      });
+      await loadSamples();
+      loadStatus(false);
+      setToast(t('msg_cleared'), 'warn');
+    });
+
+    function renderStatusSnapshot(data, syncForm = false) {
+      const st = data.state || 'error';
+      liveConfig = data.config || {};
+      liveLastError = data.last_error || '';
+      liveWakeMode = liveConfig.wake_mode || 'text';
+      currentSampleCount = data.sample_count ?? currentSampleCount;
+      lastSampleScore = data.last_sample_score ?? 0;
+      lastSampleHit = Boolean(data.last_sample_hit);
+
+      applyPauseVisuals(Boolean(data.paused), st, Boolean(data.wake_test_mode));
+      applyWakeTestVisuals(
+        data.wake_test_mode,
+        data.wake_test_hits,
+        data.last_wake_test_ts,
+        data.last_wake_test_keyword,
+        liveConfig.keywords_threshold,
+        liveConfig.keywords_score,
+        liveWakeMode,
+        liveConfig.voice_sample_threshold,
+        lastSampleScore,
+        lastSampleHit,
+        currentSampleCount
+      );
+
+      document.getElementById('badge-mode').textContent =
+        liveWakeMode === 'voice_sample' ? t('mode_badge_sample', { n: currentSampleCount }) : t('mode_badge_text');
+      document.getElementById('sample-count-badge').textContent = t('sample_count', { n: currentSampleCount });
+
+      const hkEnabled = liveConfig.hotkey_enabled;
+      const hkName = liveConfig.hotkey || '-';
+      const hkBadge = !hkEnabled ? t('hk_off')
+        : (data.hotkey_registered ? hkName : t('hk_unavailable', { hk: hkName }));
+      document.getElementById('badge-hotkey').textContent = hkBadge;
+
+      const micName = data.active_device || liveConfig.mic_mode || '-';
+      document.getElementById('badge-mic').textContent = micName;
+
+      const projName = liveConfig.project_name || '-';
+      const mName = liveConfig.model_keyword || t('opt_eff_follow');
+      const eName = liveConfig.thinking_effort ? ` (${liveConfig.thinking_effort})` : '';
+      document.getElementById('badge-target').textContent = `${projName} · ${mName}${eName}`;
+
+      const axOk = Boolean(data.ax_status?.ax_trusted);
+      document.getElementById('row-ax-warn').classList.toggle('hidden', axOk);
+
+      if (syncForm) {
+        const cfg = liveConfig;
+        uiLanguagePref = cfg.ui_language || 'auto';
+        document.getElementById('f-lang').value = uiLanguagePref;
+        const resolved = resolveEffectiveLang();
+        if (resolved !== currentLang) {
+          currentLang = resolved;
+          applyStaticI18n();
+        }
+
+        applyWakeModeUI(cfg.wake_mode || 'text');
+        document.getElementById('f-voice-en').checked = cfg.voice_wake_enabled !== false;
+        document.getElementById('f-hotkey-en').checked = cfg.hotkey_enabled !== false;
+        syncHotkeyRowDim();
+        document.getElementById('f-hotkey').value = cfg.hotkey || 'ctrl+g';
+        document.getElementById('f-wake').value = cfg.wake_phrase || 'HEY GRAVITY';
+        document.getElementById('f-aliases').value = Array.isArray(cfg.wake_aliases) ? cfg.wake_aliases.join(', ') : '';
+        document.getElementById('f-sample-thresh').value = cfg.voice_sample_threshold ?? 0.72;
+        document.getElementById('f-silence').value = cfg.silence_timeout_sec ?? 1.8;
+        document.getElementById('f-thresh').value = cfg.keywords_threshold ?? 0.25;
+        document.getElementById('f-score').value = cfg.keywords_score ?? 1.0;
+        document.getElementById('f-vol').value = cfg.sounds?.volume ?? 0.5;
+        syncSliderLabels();
+        syncPresetHighlight();
+        syncWakePhraseTip();
+
+        const projOpts = (data.available_projects || []).map(p => ({ value: p.name, label: p.name }));
+        populateSelect(document.getElementById('f-project'), projOpts, cfg.project_name);
+
+        if (Array.isArray(data.available_models) && data.available_models.length > 0) {
+          cachedModels = data.available_models;
+        }
+        populateSelect(
+          document.getElementById('f-model'),
+          localizedModelOptions(),
+          cfg.model_keyword !== undefined ? cfg.model_keyword : 'Orchestrator'
+        );
+        syncEffortOptions(cfg.thinking_effort !== undefined ? cfg.thinking_effort : '');
+
+        const micOpts = [
+          { value: 'built-in', label: t('opt_mic_builtin') },
+          { value: 'default', label: t('opt_mic_default') },
+          ...(data.available_mics || []).map(m => ({ value: m.name, label: m.name + (m.is_builtin ? t('opt_mic_tag') : '') })),
+        ];
+        populateSelect(document.getElementById('f-mic'), micOpts, cfg.mic_mode);
+        lastSavedJson = JSON.stringify(buildConfigPayload());
+      } else {
+        // Keep localized options fresh in select elements without overwriting dirty values
+        const modelSel = document.getElementById('f-model');
+        const curModel = modelSel.value;
+        populateSelect(modelSel, localizedModelOptions(), curModel);
+        syncEffortOptions(document.getElementById('f-effort').value);
+        const micSel = document.getElementById('f-mic');
+        const curMic = micSel.value;
+        const micOpts = [
+          { value: 'built-in', label: t('opt_mic_builtin') },
+          { value: 'default', label: t('opt_mic_default') },
+          ...(data.available_mics || []).map(m => ({ value: m.name, label: m.name + (m.is_builtin ? t('opt_mic_tag') : '') })),
+        ];
+        populateSelect(micSel, micOpts, curMic);
+      }
+    }
+
+    async function loadStatus(forceForm = false) {
+      try {
+        const res = await apiFetch(forceForm ? '/api/status?refresh=1' : '/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+
+        if (typeof data.ui_mtime === 'number' && data.ui_mtime > 0) {
+          if (!initialUiMtime) {
+            initialUiMtime = data.ui_mtime;
+          } else if (data.ui_mtime !== initialUiMtime) {
+            window.location.reload();
+            return;
+          }
+        }
+        if (data.system_lang === 'zh' || data.system_lang === 'en') {
+          backendSystemLang = data.system_lang;
+        }
+        lastStatusData = data;
+        const shouldSync = !formDirty || forceForm;
+        renderStatusSnapshot(data, shouldSync);
+        if (shouldSync) applyI18n(false);
+      } catch (err) {
+        headerDot.className = 'dot error';
+        statusDot.className = 'dot dot-lg error';
+        statusText.textContent = t('state_offline');
+        heroSub.textContent = t('sub_offline');
+        heroSub.className = 'hero-sub err';
+      }
+    }
+
+    function formatLogDetail(ev, item) {
+      if (currentLang === 'zh') {
+        switch (ev) {
+          case 'listening': return `正在使用「${item.device_name || '默认麦克风'}」监听`;
+          case 'hotkey_registered': return `已注册全局快捷键 ${item.hotkey || ''}`;
+          case 'hotkey_triggered': return `通过快捷键 ${item.hotkey || ''} 唤起`;
+          case 'pause_toggled': return item.paused ? '已暂停语音监听' : '已恢复语音监听';
+          case 'wake_detected': return `识别到口令（${item.keyword || ''}）`;
+          case 'wake_test_toggled': return item.enabled ? '已开启唤醒测试模式' : '已退出唤醒测试模式';
+          case 'wake_test_hit': return item.score ? `命中测试（匹配度 ${Number(item.score).toFixed(2)}）` : `命中测试（第 ${item.hits || 1} 次）`;
+          case 'sample_recorded': return `新增 1 条录制样本（${item.duration_sec || 0}s，共 ${item.total_samples || 0} 条）`;
+          case 'sample_imported': return `从音频文件导入 ${item.added || 0} 条样本`;
+          case 'sample_deleted': return item.all ? '已清空全部样本' : '已删除 1 条样本';
+          case 'prepare_result': return item.ok ? '已激活 Antigravity 并准备新对话' : '激活窗口或新建对话失败';
+          case 'start_dictation_result': return item.ok ? '已开启系统听写' : '未能启动听写';
+          case 'dictation_outcome':
+            if (item.text) return `${item.submitted ? '已自动发送' : '已输入但未发送'}：「${item.text}」`;
+            return item.reason || (item.ok ? '已完成' : '未完成');
+          case 'config_updated': return '已保存并应用最新设置';
+          case 'daemon_started': return `项目 ${item.project || '-'} · 唤醒词「${item.wake_phrase || '-'}」`;
+          default: break;
+        }
+      } else {
+        switch (ev) {
+          case 'listening': return `Listening on ${item.device_name || 'default mic'}`;
+          case 'hotkey_registered': return `Global hotkey ${item.hotkey || ''} active`;
+          case 'hotkey_triggered': return `Triggered via ${item.hotkey || ''}`;
+          case 'pause_toggled': return item.paused ? 'Voice wake paused' : 'Voice wake resumed';
+          case 'wake_detected': return `Matched "${item.keyword || ''}"`;
+          case 'wake_test_toggled': return item.enabled ? 'Test mode enabled' : 'Test mode exited';
+          case 'wake_test_hit': return item.score ? `Test match (score ${Number(item.score).toFixed(2)})` : `Test hit #${item.hits || 1}`;
+          case 'sample_recorded': return `Added sample (${item.duration_sec || 0}s, ${item.total_samples || 0} total)`;
+          case 'sample_imported': return `Imported ${item.added || 0} sample(s)`;
+          case 'sample_deleted': return item.all ? 'Cleared all samples' : 'Deleted 1 sample';
+          case 'prepare_result': return item.ok ? 'Focused Antigravity & opened chat' : 'Failed to focus or open chat';
+          case 'start_dictation_result': return item.ok ? 'Dictation started' : 'Failed to start dictation';
+          case 'dictation_outcome':
+            if (item.text) return `${item.submitted ? 'Submitted' : 'Drafted'}: "${item.text}"`;
+            return item.reason || (item.ok ? 'Completed' : 'Incomplete');
+          case 'config_updated': return 'Updated settings applied';
+          case 'daemon_started': return `Project ${item.project || '-'} · Wake "${item.wake_phrase || '-'}"`;
+          default: break;
+        }
+      }
+      const rest = JSON.stringify(item);
+      return rest === '{}' ? '' : rest;
+    }
+
+    function renderLogsList(rows) {
+      lastLogsList = Array.isArray(rows) ? rows : [];
+      const box = document.getElementById('logs-box');
+      box.innerHTML = '';
+      if (lastLogsList.length === 0) {
+        box.innerHTML = `<div class="empty-note">${t('log_empty')}</div>`;
+        return;
+      }
+      for (const item of lastLogsList) {
+        const div = document.createElement('div');
+        div.className = 'log-item';
+        const copy = Object.assign({}, item);
+        const ts = (copy.ts || '').replace(/^.*T/, '').replace(/\+.*$/, '');
+        const ev = copy.event || 'event';
+        delete copy.ts;
+        delete copy.event;
+        const label = t('ev_' + ev) === 'ev_' + ev ? ev : t('ev_' + ev);
+        const detail = formatLogDetail(ev, copy);
+        div.innerHTML = `<div class="log-top"><span class="log-ev"></span><span class="log-ts"></span></div><div class="log-detail"></div>`;
+        div.querySelector('.log-ev').textContent = label;
+        div.querySelector('.log-ts').textContent = ts;
+        div.querySelector('.log-detail').textContent = detail;
+        box.appendChild(div);
+      }
+    }
+
+    async function loadLogs() {
+      try {
+        const res = await apiFetch('/api/logs?limit=25');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderLogsList(data.logs || []);
+      } catch {}
+    }
+
+    btnPause.addEventListener('click', async () => {
+      if (toggleBusy) return;
+      toggleBusy = true;
+      const currentlyPaused = btnPause.classList.contains('btn-state-start');
+      btnPause.disabled = true;
+      btnPause.className = 'btn-busy';
+      btnPause.innerHTML = `<span class="spinner"></span>${currentlyPaused ? t('btn_starting') : t('btn_pausing')}`;
+      headerDot.className = 'dot switching';
+      statusDot.className = 'dot dot-lg switching';
+      statusText.textContent = t('state_switching');
+
+      try {
+        const res = await apiFetch('/api/toggle-pause', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json();
+        toggleBusy = false;
+        if (!res.ok || !data.ok) {
+          showFeedback(t('msg_switch_err', { err: data.error || res.status }), 'err');
+          await loadStatus();
+          return;
+        }
+        applyPauseVisuals(Boolean(data.paused), data.state, Boolean(data.wake_test_mode));
+        applyWakeTestVisuals(
+          data.wake_test_mode,
+          0,
+          '',
+          '',
+          document.getElementById('f-thresh').value,
+          document.getElementById('f-score').value,
+          liveWakeMode,
+          document.getElementById('f-sample-thresh').value,
+          0,
+          false,
+          currentSampleCount
+        );
+        if (data.paused) {
+          showFeedback(
+            data.hotkey_enabled ? t('msg_paused_hk', { hk: data.hotkey }) : t('msg_paused'),
+            'warn'
+          );
+        } else if (data.voice_wake_enabled === false) {
+          showFeedback(t('msg_hk_resumed', { hk: data.hotkey }), 'info');
+        } else {
+          showFeedback(t('msg_resumed', { phrase: data.wake_phrase || 'HEY GRAVITY' }), 'ok');
+        }
+        loadStatus(false);
+        if (logsDetails.open) loadLogs();
+      } catch (err) {
+        toggleBusy = false;
+        showFeedback(t('msg_switch_err', { err: String(err) }), 'err');
+        loadStatus(false);
+      }
+    });
+
+    btnWakeTest.addEventListener('click', async () => {
+      btnWakeTest.disabled = true;
+      btnWakeTest.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const res = await apiFetch('/api/wake-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !wakeTestActive }),
+        });
+        const data = await res.json();
+        btnWakeTest.disabled = false;
+        if (!res.ok || !data.ok) {
+          showFeedback(t('msg_test_err', { err: data.error || res.status }), 'err');
+          btnWakeTest.textContent = wakeTestActive ? t('btn_stop_test') : t('btn_test_wake');
+          return;
+        }
+        applyPauseVisuals(Boolean(data.paused), data.state, Boolean(data.wake_test_mode));
+        applyWakeTestVisuals(
+          data.wake_test_mode,
+          data.wake_test_hits,
+          data.last_wake_test_ts,
+          data.last_wake_test_keyword,
+          document.getElementById('f-thresh').value,
+          document.getElementById('f-score').value,
+          liveWakeMode,
+          document.getElementById('f-sample-thresh').value,
+          lastSampleScore,
+          lastSampleHit,
+          currentSampleCount
+        );
+        showFeedback(data.wake_test_mode ? t('msg_test_on') : t('msg_test_off'), data.wake_test_mode ? 'info' : 'ok');
+        loadStatus(false);
+        if (logsDetails.open) loadLogs();
+      } catch (err) {
+        btnWakeTest.disabled = false;
+        btnWakeTest.textContent = wakeTestActive ? t('btn_stop_test') : t('btn_test_wake');
+        showFeedback(t('msg_test_err', { err: String(err) }), 'err');
+      }
+    });
+
+    document.getElementById('btn-wake-reset').addEventListener('click', async () => {
+      const res = await apiFetch('/api/wake-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true, reset: true }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        applyWakeTestVisuals(
+          data.wake_test_mode,
+          data.wake_test_hits,
+          data.last_wake_test_ts,
+          data.last_wake_test_keyword,
+          document.getElementById('f-thresh').value,
+          document.getElementById('f-score').value,
+          liveWakeMode,
+          document.getElementById('f-sample-thresh').value,
+          lastSampleScore,
+          lastSampleHit,
+          currentSampleCount
+        );
+      }
+    });
+
+    function addDiagRow(list, label, value, tone = '') {
+      const row = document.createElement('div');
+      row.className = 'diag-row';
+      const dt = document.createElement('dt');
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      if (tone) dd.className = tone;
+      row.appendChild(dt);
+      row.appendChild(dd);
+      list.appendChild(row);
+    }
+
+    function renderDiagResult(data) {
+      lastDiagData = data;
+      const list = document.getElementById('diag-list');
+      list.innerHTML = '';
+      const axOk = Boolean(data.ax?.ax_trusted);
+      const rms = Number(data.mic_rms_250ms ?? 0);
+      const engineOk = Boolean(data.kws_ok && data.vad_ok);
+      addDiagRow(list, t('diag_overall'), data.ok ? t('diag_all_ok') : t('diag_has_issue'), data.ok ? 'ok' : 'warn');
+      addDiagRow(list, t('diag_ax'), axOk ? t('diag_ax_ok') : t('diag_ax_missing'), axOk ? 'ok' : 'warn');
+      addDiagRow(list, t('diag_mic'), `${data.resolved_device_name || '-'} (${rms > 0.0005 ? t('diag_mic_live') : t('diag_mic_quiet')})`);
+      addDiagRow(list, t('diag_engine'), engineOk ? t('diag_engine_ok') : t('diag_engine_err'), engineOk ? 'ok' : 'warn');
+      if (data.ax?.model_desc) {
+        addDiagRow(list, t('diag_ui_model'), data.ax.model_desc);
+      }
+    }
+
+    document.getElementById('btn-check').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-check');
+      const box = document.getElementById('diag-box');
+      const list = document.getElementById('diag-list');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>${t('btn_checking')}`;
+      box.classList.add('show');
+      list.innerHTML = `<div class="empty-note">${t('diag_loading')}</div>`;
+      try {
+        const res = await apiFetch('/api/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        renderDiagResult(data);
+      } catch (err) {
+        lastDiagData = null;
+        list.innerHTML = `<div class="empty-note">${t('diag_failed')}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = t('btn_check');
+      }
+    });
+
+    document.getElementById('btn-close-diag').addEventListener('click', () => {
+      document.getElementById('diag-box').classList.remove('show');
+    });
+
+    document.getElementById('btn-trigger').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-trigger');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>${t('btn_triggering')}`;
+      try {
+        const res = await apiFetch('/api/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run_submit: true }),
+        });
+        const data = await res.json();
+        setToast(data.ok ? t('msg_trigger_ok') : t('msg_trigger_err', { err: data.error || '' }), data.ok ? 'ok' : 'err');
+        setTimeout(() => { loadStatus(false); if (logsDetails.open) loadLogs(); }, 1000);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = t('btn_trigger');
+      }
+    });
+
+    logsDetails.addEventListener('toggle', () => {
+      if (logsDetails.open) loadLogs();
+    });
+
+    document.getElementById('btn-refresh').addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      loadStatus(true);
+      loadLogs();
+      setToast(t('msg_refreshed'));
+    });
+
+    function buildConfigPayload() {
+      return {
+        ui_language: document.getElementById('f-lang').value || 'auto',
+        voice_wake_enabled: document.getElementById('f-voice-en').checked,
+        hotkey_enabled: document.getElementById('f-hotkey-en').checked,
+        hotkey: document.getElementById('f-hotkey').value,
+        wake_mode: selectedWakeMode,
+        wake_phrase: document.getElementById('f-wake').value,
+        wake_aliases: document.getElementById('f-aliases').value,
+        voice_sample_threshold: Number(document.getElementById('f-sample-thresh').value),
+        project_name: document.getElementById('f-project').value,
+        model_keyword: document.getElementById('f-model').value,
+        thinking_effort: document.getElementById('f-effort').value,
+        mic_mode: document.getElementById('f-mic').value,
+        silence_timeout_sec: Number(document.getElementById('f-silence').value),
+        keywords_threshold: Number(document.getElementById('f-thresh').value),
+        keywords_score: Number(document.getElementById('f-score').value),
+        volume: Number(document.getElementById('f-vol').value),
+      };
+    }
+
+    function scheduleAutoSave(delayMs = 250) {
+      formDirty = true;
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+      }
+      autoSaveTimer = setTimeout(() => {
+        autoSaveTimer = null;
+        saveConfig(false);
+      }, delayMs);
+    }
+
+    async function saveConfig(force = false) {
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+      if (recordingHotkey) return;
+      const payload = buildConfigPayload();
+      if (!String(payload.wake_phrase || '').trim()) {
+        setToast(t('msg_wake_empty'), 'warn');
+        return;
+      }
+      const payloadJson = JSON.stringify(payload);
+      if (!force && payloadJson === lastSavedJson) {
+        formDirty = false;
+        return;
+      }
+      if (saveInFlight) {
+        saveQueued = true;
+        return;
+      }
+
+      saveInFlight = true;
+      saveQueued = false;
+      const btn = document.getElementById('btn-save');
+      btn.disabled = true;
+      btn.textContent = t('btn_reloading');
+      setToast(t('msg_saving'));
+      try {
+        const res = await apiFetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payloadJson,
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          setToast(data.error || t('msg_save_err'), 'err');
+        } else {
+          lastSavedJson = payloadJson;
+          if (!saveQueued) {
+            formDirty = false;
+          }
+          setToast(t('msg_saved'), 'ok');
+          await loadStatus(false);
+          if (logsDetails.open) await loadLogs();
+        }
+      } catch (err) {
+        setToast(t('msg_save_err'), 'err');
+      } finally {
+        saveInFlight = false;
+        btn.disabled = false;
+        btn.textContent = t('btn_reload');
+        if (saveQueued) {
+          saveQueued = false;
+          saveConfig(false);
+        }
+      }
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      saveConfig(true);
+    });
+
+    applyStaticI18n();
+    loadStatus(true);
+    schedulePoll();
+  </script>
+</body>
+</html>

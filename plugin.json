@@ -1,0 +1,30 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "voice-wake",
+  "displayName": "Voice Wake",
+  "version": "0.1.0",
+  "description": "Offline macOS wake-word and global hotkey launcher for Google Antigravity: detects custom English phrases or recorded voice samples locally, opens a project chat, triggers built-in dictation, and auto-submits on speech pause, with a bilingual Auxiliary Pane control panel.",
+  "homepage": "https://github.com/rmqg/antigravity-voice-wake",
+  "repository": "https://github.com/rmqg/antigravity-voice-wake",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "rmqg",
+    "url": "https://github.com/rmqg"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "antigravity-plugin",
+    "voice-wake",
+    "wake-word",
+    "macos",
+    "dictation",
+    "sidecar",
+    "sherpa-onnx",
+    "efficientword-net"
+  ],
+  "suggestedPrompts": [
+    "Check Voice Wake plugin permissions and microphone status",
+    "Set Voice Wake auto-send silence pause to 2.0 seconds",
+    "Open the Voice Wake panel to record custom voice samples"
+  ]
+}
