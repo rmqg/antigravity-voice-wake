@@ -2319,8 +2319,8 @@
       const eName = liveConfig.thinking_effort ? ` (${liveConfig.thinking_effort})` : '';
       document.getElementById('badge-target').textContent = `${projName} · ${mName}${eName}`;
 
-      const axOk = Boolean(data.ax_status?.ax_trusted);
-      document.getElementById('row-ax-warn').classList.toggle('hidden', axOk);
+      const axExplicitlyDenied = Boolean(data.ax_status && data.ax_status.ax_trusted === false);
+      document.getElementById('row-ax-warn').classList.toggle('hidden', !axExplicitlyDenied);
 
       if (syncForm) {
         const cfg = liveConfig;
@@ -2636,11 +2636,17 @@
       lastDiagData = data;
       const list = document.getElementById('diag-list');
       list.innerHTML = '';
-      const axOk = Boolean(data.ax?.ax_trusted);
+      const axKnown = data.ax && typeof data.ax.ax_trusted === 'boolean';
+      const axOk = axKnown ? Boolean(data.ax.ax_trusted) : false;
       const rms = Number(data.mic_rms_250ms ?? 0);
       const engineOk = Boolean(data.kws_ok && data.vad_ok);
       addDiagRow(list, t('diag_overall'), data.ok ? t('diag_all_ok') : t('diag_has_issue'), data.ok ? 'ok' : 'warn');
-      addDiagRow(list, t('diag_ax'), axOk ? t('diag_ax_ok') : t('diag_ax_missing'), axOk ? 'ok' : 'warn');
+      addDiagRow(
+        list,
+        t('diag_ax'),
+        axOk ? t('diag_ax_ok') : (axKnown ? t('diag_ax_missing') : (data.ax?.error || t('diag_failed'))),
+        axOk ? 'ok' : 'warn'
+      );
       addDiagRow(list, t('diag_mic'), `${data.resolved_device_name || '-'} (${rms > 0.0005 ? t('diag_mic_live') : t('diag_mic_quiet')})`);
       addDiagRow(list, t('diag_engine'), engineOk ? t('diag_engine_ok') : t('diag_engine_err'), engineOk ? 'ok' : 'warn');
       if (data.ax?.model_desc) {

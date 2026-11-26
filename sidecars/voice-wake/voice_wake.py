@@ -745,7 +745,7 @@ class SingleInstanceLock:
 
 
 _READONLY_HELPER_CMDS = frozenset(
-    {"builtin-mic", "check", "inspect-composer", "dump-composer", "validate-hotkey"}
+    {"builtin-mic", "quick-check", "check", "inspect-composer", "dump-composer", "validate-hotkey"}
 )
 
 
@@ -1792,10 +1792,21 @@ def get_cached_probes(
             projects_fresh = bool(projects) and not force and (busy or (now - runtime.cached_projects_ts) < ttl)
 
         if not ax_fresh:
-            ax_status = run_ax_helper("check", timeout=4.0)
-            with runtime.lock:
-                runtime.cached_ax_status = ax_status
-                runtime.cached_ax_ts = time.monotonic()
+            probe_res = run_ax_helper("quick-check", timeout=4.0)
+            if "ax_trusted" in probe_res:
+                ax_status = probe_res
+                with runtime.lock:
+                    runtime.cached_ax_status = ax_status
+                    runtime.cached_ax_ts = time.monotonic()
+            else:
+                with runtime.lock:
+                    prev_ax = runtime.cached_ax_status
+                    if "ax_trusted" in prev_ax:
+                        ax_status = prev_ax
+                    else:
+                        ax_status = probe_res
+                        runtime.cached_ax_status = ax_status
+                        runtime.cached_ax_ts = 0.0
 
         if not mics_fresh:
             builtin_name = str(ax_status.get("builtin_mic_name", "")).strip()

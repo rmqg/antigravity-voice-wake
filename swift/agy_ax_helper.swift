@@ -172,7 +172,7 @@ func axElementAttr(_ el: AXUIElement, _ attr: String) -> AXUIElement? {
     return (obj as! AXUIElement)
 }
 
-func axSearch(_ root: AXUIElement, key: String? = nil, text: String? = nil, limit: Int = 20) -> [AXUIElement] {
+func axSearchChecked(_ root: AXUIElement, key: String? = nil, text: String? = nil, limit: Int = 20) -> (supported: Bool, results: [AXUIElement]) {
     var pred: [String: Any] = [
         "AXDirection": "AXDirectionNext",
         "AXImmediateDescendantsOnly": false,
@@ -181,15 +181,20 @@ func axSearch(_ root: AXUIElement, key: String? = nil, text: String? = nil, limi
     if let key = key { pred["AXSearchKey"] = key }
     if let text = text { pred["AXSearchText"] = text }
     var res: AnyObject?
-    guard AXUIElementCopyParameterizedAttributeValue(
+    let err = AXUIElementCopyParameterizedAttributeValue(
         root,
         "AXUIElementsForSearchPredicate" as CFString,
         pred as CFDictionary,
         &res
-    ) == .success, let arr = res as? [AXUIElement] else {
-        return []
+    )
+    guard err == .success else {
+        return (false, [])
     }
-    return arr
+    return (true, (res as? [AXUIElement]) ?? [])
+}
+
+func axSearch(_ root: AXUIElement, key: String? = nil, text: String? = nil, limit: Int = 20) -> [AXUIElement] {
+    axSearchChecked(root, key: key, text: text, limit: limit).results
 }
 
 func findFirst(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, skipNestedWebAreas: Bool = true, where predicate: (AXUIElement) -> Bool) -> AXUIElement? {
@@ -450,15 +455,21 @@ func findMessageInput(_ axApp: AXUIElement?, _ webArea: AXUIElement) -> AXUIElem
        axString(focused, kAXDescriptionAttribute) == "Message input" {
         return focused
     }
-    if let hit = axSearch(webArea, key: "AXTextFieldSearchKey", limit: 10).first(where: {
+    let keySearch = axSearchChecked(webArea, key: "AXTextFieldSearchKey", limit: 10)
+    if let hit = keySearch.results.first(where: {
         axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
     }) {
         return hit
     }
-    if let hit = axSearch(webArea, text: "Message input", limit: 10).first(where: {
+    let textSearch = axSearchChecked(webArea, text: "Message input", limit: 10)
+    if let hit = textSearch.results.first(where: {
         axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
     }) {
         return hit
+    }
+    // Only fall back to BFS if Chromium's in-process AX search predicate is unavailable.
+    if keySearch.supported || textSearch.supported {
+        return nil
     }
     return findFirst(webArea, maxNodes: 2500, maxDepth: 50) { el in
         axString(el, kAXRoleAttribute) == "AXTextArea" && axString(el, kAXDescriptionAttribute) == "Message input"
@@ -592,6 +603,20 @@ func runBuiltInMic() -> ([String: Any], Int32) {
         "builtin_mic_id": mic?.id ?? 0,
         "builtin_mic_name": mic?.name ?? ""
     ], (mic != nil) ? 0 : 1)
+}
+
+func runQuickCheck() -> ([String: Any], Int32) {
+    let trusted = AXIsProcessTrusted()
+    let mic = findBuiltInInputDevice()
+    let app = findAntigravityApp()
+    return ([
+        "ok": trusted && (mic != nil),
+        "ax_trusted": trusted,
+        "antigravity_running": app != nil,
+        "antigravity_pid": app?.processIdentifier ?? 0,
+        "builtin_mic_id": mic?.id ?? 0,
+        "builtin_mic_name": mic?.name ?? ""
+    ], (trusted && (mic != nil)) ? 0 : 1)
 }
 
 func runCheck() -> ([String: Any], Int32) {
@@ -1208,6 +1233,8 @@ func dispatchCommand(_ argv: [String]) -> ([String: Any], Int32) {
     switch cmd {
     case "builtin-mic":
         return runBuiltInMic()
+    case "quick-check":
+        return runQuickCheck()
     case "check":
         return runCheck()
     case "activate":
@@ -1260,7 +1287,7 @@ func cmdServe() -> Never {
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {
-    failJSON("usage: agy-ax-helper <builtin-mic|check|activate|prepare-code-orchestrator|inspect-composer|start-dictation|stop-dictation|submit|dump-composer|validate-hotkey|watch-hotkey|serve>")
+    failJSON("usage: agy-ax-helper <builtin-mic|quick-check|check|activate|prepare-code-orchestrator|inspect-composer|start-dictation|stop-dictation|submit|dump-composer|validate-hotkey|watch-hotkey|serve>")
 }
 
 let subArgs = Array(args.dropFirst())
