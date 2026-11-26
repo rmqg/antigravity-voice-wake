@@ -17,6 +17,13 @@ func emitJSON(_ dict: [String: Any], exitCode: Int32 = 0) -> Never {
     exit(exitCode)
 }
 
+func failDict(_ message: String, extra: [String: Any] = [:]) -> ([String: Any], Int32) {
+    var d = extra
+    d["ok"] = false
+    d["error"] = message
+    return (d, 1)
+}
+
 func failJSON(_ message: String, extra: [String: Any] = [:]) -> Never {
     var d = extra
     d["ok"] = false
@@ -94,14 +101,27 @@ func findBuiltInInputDevice() -> (id: AudioDeviceID, name: String)? {
 
 // MARK: - Accessibility Helpers
 
+var lastAxManualPid: pid_t = 0
+
 func findAntigravityApp() -> NSRunningApplication? {
-    NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.google.antigravity" }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.002))
+    return NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.antigravity").first
+        ?? NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.google.antigravity" }
 }
 
 func axAppElement(_ app: NSRunningApplication) -> AXUIElement {
-    let axApp = AXUIElementCreateApplication(app.processIdentifier)
-    AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+    if pid != lastAxManualPid {
+        AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        lastAxManualPid = pid
+    }
+    AXUIElementSetMessagingTimeout(axApp, 1.5)
     return axApp
+}
+
+func isAppFrontmost(_ app: NSRunningApplication, _ axApp: AXUIElement) -> Bool {
+    axBool(axApp, kAXFrontmostAttribute) ?? app.isActive
 }
 
 func axString(_ el: AXUIElement, _ attr: String) -> String {
@@ -144,12 +164,43 @@ func axPress(_ el: AXUIElement) -> Bool {
     AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
 }
 
-func findFirst(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, where predicate: (AXUIElement) -> Bool) -> AXUIElement? {
+func axElementAttr(_ el: AXUIElement, _ attr: String) -> AXUIElement? {
+    var v: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success, let obj = v else {
+        return nil
+    }
+    return (obj as! AXUIElement)
+}
+
+func axSearch(_ root: AXUIElement, key: String? = nil, text: String? = nil, limit: Int = 20) -> [AXUIElement] {
+    var pred: [String: Any] = [
+        "AXDirection": "AXDirectionNext",
+        "AXImmediateDescendantsOnly": false,
+        "AXResultsLimit": limit
+    ]
+    if let key = key { pred["AXSearchKey"] = key }
+    if let text = text { pred["AXSearchText"] = text }
+    var res: AnyObject?
+    guard AXUIElementCopyParameterizedAttributeValue(
+        root,
+        "AXUIElementsForSearchPredicate" as CFString,
+        pred as CFDictionary,
+        &res
+    ) == .success, let arr = res as? [AXUIElement] else {
+        return []
+    }
+    return arr
+}
+
+func findFirst(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, skipNestedWebAreas: Bool = true, where predicate: (AXUIElement) -> Bool) -> AXUIElement? {
     var queue: [(AXUIElement, Int)] = [(root, 0)]
     var idx = 0
     while idx < queue.count && idx < maxNodes {
         let (node, depth) = queue[idx]
         idx += 1
+        if skipNestedWebAreas && depth > 0 && axString(node, kAXRoleAttribute) == "AXWebArea" {
+            continue
+        }
         if predicate(node) { return node }
         if depth < maxDepth {
             for child in axChildren(node) {
@@ -160,13 +211,16 @@ func findFirst(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, wh
     return nil
 }
 
-func findAll(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, where predicate: (AXUIElement) -> Bool) -> [AXUIElement] {
+func findAll(_ root: AXUIElement, maxNodes: Int = 5000, maxDepth: Int = 60, skipNestedWebAreas: Bool = true, where predicate: (AXUIElement) -> Bool) -> [AXUIElement] {
     var results: [AXUIElement] = []
     var queue: [(AXUIElement, Int)] = [(root, 0)]
     var idx = 0
     while idx < queue.count && idx < maxNodes {
         let (node, depth) = queue[idx]
         idx += 1
+        if skipNestedWebAreas && depth > 0 && axString(node, kAXRoleAttribute) == "AXWebArea" {
+            continue
+        }
         if predicate(node) { results.append(node) }
         if depth < maxDepth {
             for child in axChildren(node) {
@@ -205,10 +259,22 @@ func findMainWebArea(_ window: AXUIElement) -> AXUIElement? {
         }
     }
 
-    // Pass 2: Fallback structural scan only if title match missed.
+    // Pass 2: Fast in-process Chromium AX predicate lookup, then bounded BFS fallback.
     for wa in webAreas {
         let title = axString(wa, kAXTitleAttribute)
         if title == "Device Activation" || title == "Voice Wake" { continue }
+        let hasTextField = axSearch(wa, key: "AXTextFieldSearchKey", limit: 5).contains { el in
+            axString(el, kAXRoleAttribute) == "AXTextArea" && axString(el, kAXDescriptionAttribute) == "Message input"
+        }
+        if hasTextField {
+            return wa
+        }
+        let hasSidebar = axSearch(wa, key: "AXLinkSearchKey", text: "New Conversation", limit: 5).contains { el in
+            axString(el, kAXRoleAttribute) == "AXLink" && axString(el, kAXDescriptionAttribute) == "New Conversation"
+        }
+        if hasSidebar {
+            return wa
+        }
         let hasComposerOrSidebar = findFirst(wa, maxNodes: 2500, maxDepth: 45, where: { el in
             let r = axString(el, kAXRoleAttribute)
             let d = axString(el, kAXDescriptionAttribute)
@@ -237,13 +303,29 @@ func axCenter(_ el: AXUIElement) -> CGPoint? {
 }
 
 func findMainWindowAndWebArea(_ axApp: AXUIElement) -> (window: AXUIElement, webArea: AXUIElement)? {
+    var checked: [AXUIElement] = []
+    if let mainWin = axElementAttr(axApp, kAXMainWindowAttribute) {
+        checked.append(mainWin)
+        if let wa = findMainWebArea(mainWin) {
+            return (mainWin, wa)
+        }
+    }
+    if let focusedWin = axElementAttr(axApp, kAXFocusedWindowAttribute),
+       !checked.contains(where: { CFEqual($0, focusedWin) }) {
+        checked.append(focusedWin)
+        if let wa = findMainWebArea(focusedWin) {
+            return (focusedWin, wa)
+        }
+    }
+
     let wins = axWindows(axApp)
-    // Prefer AXStandardWindow first, then any window with a main AXWebArea
+    // Prefer AXStandardWindow first, then any remaining window with a main AXWebArea
     let ordered = wins.sorted {
         (axString($0, kAXSubroleAttribute) == "AXStandardWindow" ? 0 : 1) <
         (axString($1, kAXSubroleAttribute) == "AXStandardWindow" ? 0 : 1)
     }
     for w in ordered {
+        if checked.contains(where: { CFEqual($0, w) }) { continue }
         if let wa = findMainWebArea(w) {
             return (w, wa)
         }
@@ -301,19 +383,31 @@ func pasteString(_ text: String) {
 
 func activateAntigravity() -> (app: NSRunningApplication, axApp: AXUIElement, window: AXUIElement, webArea: AXUIElement)? {
     guard let app = findAntigravityApp() else { return nil }
+    let axApp = axAppElement(app)
+
+    // Fast-path when Antigravity is already active and visible to avoid spawning /usr/bin/open.
+    if isAppFrontmost(app, axApp) && !app.isHidden, let pair = findMainWindowAndWebArea(axApp) {
+        if axBool(pair.window, kAXMinimizedAttribute) == true {
+            AXUIElementSetAttributeValue(pair.window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        AXUIElementPerformAction(pair.window, kAXRaiseAction as CFString)
+        return (app, axApp, pair.window, pair.webArea)
+    }
+
     app.unhide()
     app.activate(options: [.activateAllWindows])
-    // Fallback open -a to ensure macOS switches Space if needed
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    proc.arguments = ["-a", "Antigravity"]
-    try? proc.run()
-    proc.waitUntilExit()
+    usleep(150_000)
+    if !isAppFrontmost(app, axApp) || findMainWindowAndWebArea(axApp) == nil {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = ["-a", "Antigravity"]
+        try? proc.run()
+        proc.waitUntilExit()
+    }
 
-    let axApp = axAppElement(app)
-    let deadline = Date().addingTimeInterval(2.5)
+    let deadline = Date().addingTimeInterval(4.0)
     while Date() < deadline {
-        if !app.isActive {
+        if !isAppFrontmost(app, axApp) {
             app.activate(options: [.activateAllWindows])
         }
         for w in axWindows(axApp) where axString(w, kAXSubroleAttribute) == "AXStandardWindow" {
@@ -329,7 +423,7 @@ func activateAntigravity() -> (app: NSRunningApplication, axApp: AXUIElement, wi
             AXUIElementPerformAction(pair.window, kAXRaiseAction as CFString)
             return (app, axApp, pair.window, pair.webArea)
         }
-        usleep(100_000)
+        usleep(120_000)
     }
     return nil
 }
@@ -340,166 +434,270 @@ func isModelSelector(_ el: AXUIElement) -> Bool {
     return d.hasPrefix("Select model") || d.hasPrefix("Model:")
 }
 
-func getComposerState(_ app: NSRunningApplication, _ webArea: AXUIElement) -> [String: Any] {
+struct ComposerHandles {
     var msgInput: AXUIElement?
     var modelBtn: AXUIElement?
     var idleBtn: AXUIElement?
     var activeBtn: AXUIElement?
     var sendBtn: AXUIElement?
+    var cancelBtn: AXUIElement?
+}
 
-    // Single BFS pass over the main WebArea; prune any nested AXWebArea subtrees.
-    var queue: [(AXUIElement, Int)] = [(webArea, 0)]
-    var idx = 0
-    while idx < queue.count && idx < 4000 {
-        let (node, depth) = queue[idx]
-        idx += 1
+func findMessageInput(_ axApp: AXUIElement?, _ webArea: AXUIElement) -> AXUIElement? {
+    if let appEl = axApp,
+       let focused = axElementAttr(appEl, kAXFocusedUIElementAttribute),
+       axString(focused, kAXRoleAttribute) == "AXTextArea",
+       axString(focused, kAXDescriptionAttribute) == "Message input" {
+        return focused
+    }
+    if let hit = axSearch(webArea, key: "AXTextFieldSearchKey", limit: 10).first(where: {
+        axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
+    }) {
+        return hit
+    }
+    if let hit = axSearch(webArea, text: "Message input", limit: 10).first(where: {
+        axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
+    }) {
+        return hit
+    }
+    return findFirst(webArea, maxNodes: 2500, maxDepth: 50) { el in
+        axString(el, kAXRoleAttribute) == "AXTextArea" && axString(el, kAXDescriptionAttribute) == "Message input"
+    }
+}
+
+func getComposerHandles(_ axApp: AXUIElement?, _ webArea: AXUIElement) -> ComposerHandles {
+    var h = ComposerHandles()
+
+    func inspectControl(_ node: AXUIElement) {
         let r = axString(node, kAXRoleAttribute)
-        if depth > 0 && r == "AXWebArea" {
-            continue
-        }
-        if r == "AXTextArea" {
-            if msgInput == nil && axString(node, kAXDescriptionAttribute) == "Message input" {
-                msgInput = node
-            }
-        } else if r == "AXPopUpButton" {
-            if modelBtn == nil {
-                let d = axString(node, kAXDescriptionAttribute)
-                if d.hasPrefix("Select model") || d.hasPrefix("Model:") {
-                    modelBtn = node
+        if r == "AXPopUpButton" {
+            if h.modelBtn == nil {
+                let desc = axString(node, kAXDescriptionAttribute)
+                if desc.hasPrefix("Select model") || desc.hasPrefix("Model:") {
+                    h.modelBtn = node
                 }
             }
         } else if r == "AXButton" {
             let dRaw = axString(node, kAXDescriptionAttribute)
-            if idleBtn == nil && dRaw == "Record voice memo" {
-                idleBtn = node
+            if h.idleBtn == nil && dRaw == "Record voice memo" {
+                h.idleBtn = node
             }
             let d = dRaw.lowercased()
             let t = axString(node, kAXTitleAttribute).lowercased()
             let s = "\(d) \(t)"
-            if activeBtn == nil && (d == "stop recording" || s.contains("stop recording") || s.contains("stop dictation") || s.contains("stop voice memo")) {
-                activeBtn = node
+            let isStopRec = (d == "stop recording" || s.contains("stop recording") || s.contains("stop dictation") || s.contains("stop voice memo"))
+            if h.activeBtn == nil && isStopRec {
+                h.activeBtn = node
             }
-            if sendBtn == nil && (d == "send message" || d == "send" || t == "send" || d.contains("send prompt")) {
+            if h.sendBtn == nil && (d == "send message" || d == "send" || t == "send" || d.contains("send prompt")) {
                 if axBool(node, kAXEnabledAttribute) ?? true {
-                    sendBtn = node
+                    h.sendBtn = node
                 }
             }
-        }
-        if depth < 55 {
-            for child in axChildren(node) {
-                queue.append((child, depth + 1))
+            if !isStopRec && h.cancelBtn == nil && (s.contains("cancel") || s.contains("stop")) {
+                h.cancelBtn = node
             }
         }
     }
 
-    let text = msgInput.map { collectText($0) } ?? ""
-    let modelDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
-    let recActive = (activeBtn != nil)
-    let dictDesc = activeBtn.map { axString($0, kAXDescriptionAttribute) } ?? (idleBtn.map { axString($0, kAXDescriptionAttribute) } ?? "")
+    h.msgInput = findMessageInput(axApp, webArea)
+    if let mi = h.msgInput {
+        var scope: AXUIElement = mi
+        for _ in 1...4 {
+            if let p = axParent(scope) {
+                scope = p
+            }
+        }
+        let controls = axSearch(scope, key: "AXControlSearchKey", limit: 40)
+        if !controls.isEmpty {
+            for ctrl in controls {
+                inspectControl(ctrl)
+            }
+        } else {
+            var q: [(AXUIElement, Int)] = [(scope, 0)]
+            var i = 0
+            while i < q.count && i < 200 {
+                let (node, d) = q[i]
+                i += 1
+                let r = axString(node, kAXRoleAttribute)
+                if d > 0 && r == "AXWebArea" { continue }
+                if r == "AXPopUpButton" || r == "AXButton" {
+                    inspectControl(node)
+                }
+                if d < 10 {
+                    for child in axChildren(node) {
+                        q.append((child, d + 1))
+                    }
+                }
+            }
+        }
+        return h
+    }
+
+    // Fallback when Message input is absent: targeted predicates without full-tree BFS
+    for el in axSearch(webArea, key: "AXControlSearchKey", text: "Model", limit: 10) {
+        inspectControl(el)
+    }
+    if h.modelBtn == nil {
+        for el in axSearch(webArea, key: "AXControlSearchKey", text: "Select model", limit: 10) {
+            inspectControl(el)
+        }
+    }
+    for el in axSearch(webArea, key: "AXButtonSearchKey", text: "Record voice memo", limit: 5) {
+        inspectControl(el)
+    }
+    for el in axSearch(webArea, key: "AXButtonSearchKey", text: "Stop", limit: 10) {
+        let r = axString(el, kAXRoleAttribute)
+        if r == "AXButton" {
+            let d = axString(el, kAXDescriptionAttribute).lowercased()
+            let t = axString(el, kAXTitleAttribute).lowercased()
+            let s = "\(d) \(t)"
+            if h.activeBtn == nil && (d == "stop recording" || s.contains("stop recording") || s.contains("stop dictation") || s.contains("stop voice memo")) {
+                h.activeBtn = el
+            }
+        }
+    }
+    for el in axSearch(webArea, key: "AXButtonSearchKey", text: "Send", limit: 5) {
+        inspectControl(el)
+    }
+    return h
+}
+
+func getComposerState(_ app: NSRunningApplication, _ axApp: AXUIElement, _ webArea: AXUIElement) -> [String: Any] {
+    let h = getComposerHandles(axApp, webArea)
+    let text = h.msgInput.map { collectText($0) } ?? ""
+    let modelDesc = h.modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
+    let recActive = (h.activeBtn != nil)
+    let dictDesc = h.activeBtn.map { axString($0, kAXDescriptionAttribute) } ?? (h.idleBtn.map { axString($0, kAXDescriptionAttribute) } ?? "")
 
     return [
         "ok": true,
-        "antigravity_active": app.isActive,
-        "message_input_found": msgInput != nil,
+        "antigravity_active": isAppFrontmost(app, axApp),
+        "message_input_found": h.msgInput != nil,
         "text": text,
         "char_count": text.count,
         "recording_active": recActive,
         "dictation_button_desc": dictDesc,
-        "send_button_present": sendBtn != nil,
+        "send_button_present": h.sendBtn != nil,
         "model_desc": modelDesc
     ]
 }
 
 // MARK: - Subcommands
 
-func cmdCheck() -> Never {
+func runBuiltInMic() -> ([String: Any], Int32) {
+    let mic = findBuiltInInputDevice()
+    return ([
+        "ok": mic != nil,
+        "builtin_mic_id": mic?.id ?? 0,
+        "builtin_mic_name": mic?.name ?? ""
+    ], (mic != nil) ? 0 : 1)
+}
+
+func runCheck() -> ([String: Any], Int32) {
     let trusted = AXIsProcessTrusted()
     let mic = findBuiltInInputDevice()
     guard let app = findAntigravityApp() else {
-        emitJSON([
+        return ([
             "ok": false,
             "ax_trusted": trusted,
             "antigravity_running": false,
             "builtin_mic_id": mic?.id ?? 0,
             "builtin_mic_name": mic?.name ?? "",
             "error": "antigravity_not_running"
-        ], exitCode: 1)
+        ], 1)
     }
     let axApp = axAppElement(app)
     let wins = axWindows(axApp)
     var msgVisible = false
     var modelDesc = ""
     if let pair = findMainWindowAndWebArea(axApp) {
-        let state = getComposerState(app, pair.webArea)
+        let state = getComposerState(app, axApp, pair.webArea)
         msgVisible = (state["message_input_found"] as? Bool) ?? false
         modelDesc = (state["model_desc"] as? String) ?? ""
     }
-    emitJSON([
+    return ([
         "ok": trusted && (mic != nil),
         "ax_trusted": trusted,
         "antigravity_running": true,
         "antigravity_pid": app.processIdentifier,
-        "antigravity_active": app.isActive,
+        "antigravity_active": isAppFrontmost(app, axApp),
         "window_count": wins.count,
         "message_input_visible": msgVisible,
         "model_desc": modelDesc,
         "builtin_mic_id": mic?.id ?? 0,
         "builtin_mic_name": mic?.name ?? ""
-    ], exitCode: (trusted && mic != nil) ? 0 : 1)
+    ], (trusted && mic != nil) ? 0 : 1)
 }
 
-func cmdActivate() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let (app, _, _, wa) = activateAntigravity() else {
-        failJSON("antigravity_activate_failed")
+func runActivate() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let (app, axApp, _, wa) = activateAntigravity() else {
+        return failDict("antigravity_activate_failed")
     }
-    emitJSON([
+    return ([
         "ok": true,
         "pid": app.processIdentifier,
-        "active": app.isActive,
+        "active": isAppFrontmost(app, axApp),
         "webarea_title": axString(wa, kAXTitleAttribute)
-    ])
+    ], 0)
 }
 
-func cmdPrepare(project: String, modelKeyword: String, effort: String) -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let (_, _, window, initialWa) = activateAntigravity() else {
-        failJSON("antigravity_activate_failed")
+func runPrepare(project: String, modelKeyword: String, effort: String) -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let (_, axApp, window, initialWa) = activateAntigravity() else {
+        return failDict("antigravity_activate_failed")
     }
     var wa = initialWa
 
-    // 1. Find project button in sidebar; toggle sidebar if hidden
-    var projBtn = findFirst(wa) {
-        axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
-    }
-    if projBtn == nil {
-        let newConvLink = findFirst(wa, maxNodes: 600) {
-            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
-        }
-        if newConvLink == nil, let toggleBtn = findFirst(wa, maxNodes: 400, where: {
-            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
+    func findProjectButton(_ root: AXUIElement) -> AXUIElement? {
+        if let hit = axSearch(root, key: "AXButtonSearchKey", text: project, limit: 30).first(where: {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
         }) {
-            _ = axPress(toggleBtn)
-            usleep(350_000)
-            projBtn = findFirst(wa) {
-                axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
+            return hit
+        }
+        return findFirst(root, maxNodes: 2500, maxDepth: 40) {
+            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXTitleAttribute) == project
+        }
+    }
+
+    // 1. Find project button in sidebar; toggle sidebar if hidden
+    var projBtn = findProjectButton(wa)
+    if projBtn == nil {
+        let hasNewConvLink = axSearch(wa, key: "AXLinkSearchKey", text: "New Conversation", limit: 5).contains {
+            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
+        } || findFirst(wa, maxNodes: 600, maxDepth: 25) {
+            axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation"
+        } != nil
+        if !hasNewConvLink {
+            let toggleBtn = axSearch(wa, key: "AXButtonSearchKey", text: "Toggle Sidebar", limit: 5).first(where: {
+                axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
+            }) ?? findFirst(wa, maxNodes: 400, maxDepth: 20) {
+                axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Toggle Sidebar"
+            }
+            if let toggleBtn = toggleBtn {
+                _ = axPress(toggleBtn)
+                usleep(350_000)
+                projBtn = findProjectButton(wa)
             }
         }
     }
 
+    let prevTitle = axString(wa, kAXTitleAttribute)
     var openedViaSidebar = false
     if let btn = projBtn {
         var cur: AXUIElement? = btn
         for _ in 1...4 {
             if let p = cur.flatMap(axParent) {
                 cur = p
-                if let newInProj = findFirst(p, maxNodes: 100, maxDepth: 6, where: {
+                let newInProj = axSearch(p, key: "AXLinkSearchKey", text: "New Conversation in Project", limit: 5).first(where: {
                     axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation in Project"
-                }) {
-                    if axPress(newInProj) {
-                        openedViaSidebar = true
-                        break
-                    }
+                }) ?? findFirst(p, maxNodes: 80, maxDepth: 6) {
+                    axString($0, kAXRoleAttribute) == "AXLink" && axString($0, kAXDescriptionAttribute) == "New Conversation in Project"
+                }
+                if let newInProj = newInProj, axPress(newInProj) {
+                    openedViaSidebar = true
+                    break
                 }
             }
         }
@@ -514,27 +712,47 @@ func cmdPrepare(project: String, modelKeyword: String, effort: String) -> Never 
         usleep(450_000)
     }
 
-    // 2. Wait up to 2.5s for new empty conversation in target project
+    // 2. Wait up to 5.0s for new empty conversation in target project via Chromium AX search predicates
     var projectVerified = false
     var msgInput: AXUIElement?
-    let waitDeadline = Date().addingTimeInterval(2.5)
+    var modelBtn: AXUIElement?
+    let waitStart = Date()
+    let waitDeadline = waitStart.addingTimeInterval(5.0)
     while Date() < waitDeadline {
-        let newProjPicker = findFirst(wa, maxNodes: 3000) {
-            let r = axString($0, kAXRoleAttribute)
-            let d = axString($0, kAXDescriptionAttribute)
-            return r == "AXPopUpButton" && d.hasPrefix("Select project") && d.localizedCaseInsensitiveContains(project)
-        }
-        msgInput = findFirst(wa, maxNodes: 3000) {
-            axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
+        let handles = getComposerHandles(axApp, wa)
+        msgInput = handles.msgInput
+        if handles.modelBtn != nil {
+            modelBtn = handles.modelBtn
         }
         if msgInput == nil {
             wa = findMainWebArea(window) ?? wa
+        } else {
+            let emptyInput = collectText(msgInput!).isEmpty
+            if emptyInput {
+                let projectPickers = axSearch(wa, key: "AXControlSearchKey", text: "Select project", limit: 10).filter {
+                    axString($0, kAXRoleAttribute) == "AXPopUpButton" && axString($0, kAXDescriptionAttribute).hasPrefix("Select project")
+                }
+                let matchingPicker = projectPickers.first {
+                    axString($0, kAXDescriptionAttribute).localizedCaseInsensitiveContains(project)
+                }
+                let mismatchedPicker = (matchingPicker == nil) ? projectPickers.first : nil
+                if matchingPicker != nil {
+                    projectVerified = true
+                    break
+                } else if openedViaSidebar && mismatchedPicker == nil {
+                    let curTitle = axString(wa, kAXTitleAttribute)
+                    let mDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
+                    let elapsed = Date().timeIntervalSince(waitStart)
+                    if (curTitle != prevTitle && curTitle.localizedCaseInsensitiveContains(" - \(project) - ")) ||
+                       (mDesc.hasPrefix("Select model") && elapsed >= 0.4) ||
+                       elapsed >= 1.2 {
+                        projectVerified = true
+                        break
+                    }
+                }
+            }
         }
-        if newProjPicker != nil, let mi = msgInput, collectText(mi).isEmpty {
-            projectVerified = true
-            break
-        }
-        usleep(100_000)
+        usleep(150_000)
     }
 
     // 3. Verify or select target model & thinking effort
@@ -609,7 +827,9 @@ func cmdPrepare(project: String, modelKeyword: String, effort: String) -> Never 
 
     let normEffort = normalizeTargetEffort(effort)
     let targetModelLow = modelKeyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    var modelBtn = findFirst(wa, where: isModelSelector)
+    if modelBtn == nil {
+        modelBtn = getComposerHandles(axApp, wa).modelBtn
+    }
     var modelDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
     if !modelAndEffortMatch(modelDesc, targetModel: modelKeyword, targetEffort: normEffort), let mBtn = modelBtn {
         _ = axPress(mBtn)
@@ -653,7 +873,7 @@ func cmdPrepare(project: String, modelKeyword: String, effort: String) -> Never 
             sendKeyCombo(keyCode: 53, flags: []) // Escape
             usleep(150_000)
         }
-        modelBtn = findFirst(wa, where: isModelSelector)
+        modelBtn = getComposerHandles(axApp, wa).modelBtn
         modelDesc = modelBtn.map { axString($0, kAXDescriptionAttribute) } ?? ""
     }
 
@@ -667,30 +887,31 @@ func cmdPrepare(project: String, modelKeyword: String, effort: String) -> Never 
     }
 
     let modelOk = modelAndEffortMatch(modelDesc, targetModel: modelKeyword, targetEffort: normEffort)
-    emitJSON([
+    return ([
         "ok": projectVerified && modelOk,
         "opened_via_sidebar": openedViaSidebar,
         "project_verified": projectVerified,
         "model_desc": modelDesc,
         "focused": focused
-    ], exitCode: (projectVerified && modelOk) ? 0 : 1)
+    ], (projectVerified && modelOk) ? 0 : 1)
 }
 
-func cmdInspectComposer() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let app = findAntigravityApp() else { failJSON("antigravity_not_running") }
+func runInspectComposer() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let app = findAntigravityApp() else { return failDict("antigravity_not_running") }
     let axApp = axAppElement(app)
     guard let pair = findMainWindowAndWebArea(axApp) else {
-        failJSON("no_webarea")
+        return failDict("no_webarea")
     }
-    emitJSON(getComposerState(app, pair.webArea))
+    return (getComposerState(app, axApp, pair.webArea), 0)
 }
 
-func cmdStartDictation() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let (app, _, _, wa) = activateAntigravity() else { failJSON("antigravity_not_running") }
+func runStartDictation() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let (app, axApp, _, wa) = activateAntigravity() else { return failDict("antigravity_not_running") }
 
-    if let btn = findFirst(wa, maxNodes: 3000, where: {
+    let initialHandles = getComposerHandles(axApp, wa)
+    if let btn = initialHandles.idleBtn ?? axSearch(wa, key: "AXButtonSearchKey", text: "Record voice memo", limit: 5).first(where: {
         axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute) == "Record voice memo"
     }) {
         _ = axPress(btn)
@@ -698,122 +919,108 @@ func cmdStartDictation() -> Never {
         sendKeyCombo(keyCode: 46, flags: .maskControl) // Ctrl+M
     }
 
-    let deadline = Date().addingTimeInterval(2.0)
-    var lastState = getComposerState(app, wa)
+    let startTs = Date()
+    let deadline = startTs.addingTimeInterval(4.0)
+    var retried = false
+    var lastState: [String: Any] = [:]
     while Date() < deadline {
-        lastState = getComposerState(app, wa)
+        lastState = getComposerState(app, axApp, wa)
         if (lastState["recording_active"] as? Bool) == true {
-            emitJSON([
+            return ([
                 "ok": true,
                 "recording_active": true,
                 "dictation_button_desc": lastState["dictation_button_desc"] ?? ""
-            ])
+            ], 0)
         }
-        usleep(100_000)
+        if !retried && Date().timeIntervalSince(startTs) >= 1.6 {
+            retried = true
+            sendKeyCombo(keyCode: 46, flags: .maskControl) // Ctrl+M fallback retry
+        }
+        usleep(150_000)
     }
-    emitJSON([
+    return ([
         "ok": false,
         "recording_active": false,
         "dictation_button_desc": lastState["dictation_button_desc"] ?? "",
         "error": "dictation_start_timeout"
-    ], exitCode: 1)
+    ], 1)
 }
 
-func cmdStopDictation() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let app = findAntigravityApp() else { failJSON("antigravity_not_running") }
+func runStopDictation() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let app = findAntigravityApp() else { return failDict("antigravity_not_running") }
     let axApp = axAppElement(app)
-    guard let pair = findMainWindowAndWebArea(axApp) else { failJSON("no_webarea") }
+    guard let pair = findMainWindowAndWebArea(axApp) else { return failDict("no_webarea") }
     let wa = pair.webArea
 
-    let initial = getComposerState(app, wa)
-    if (initial["recording_active"] as? Bool) == true {
-        if let activeBtn = findFirst(wa, maxNodes: 3000, where: {
-            guard axString($0, kAXRoleAttribute) == "AXButton" else { return false }
-            let d = axString($0, kAXDescriptionAttribute).lowercased()
-            let t = axString($0, kAXTitleAttribute).lowercased()
-            let s = "\(d) \(t)"
-            return d == "stop recording" || s.contains("stop recording") || s.contains("stop dictation") || s.contains("stop voice memo")
-        }) {
-            _ = axPress(activeBtn)
-        } else {
-            sendKeyCombo(keyCode: 46, flags: .maskControl) // Ctrl+M
+    let initialHandles = getComposerHandles(axApp, wa)
+    if let activeBtn = initialHandles.activeBtn {
+        if !axPress(activeBtn) {
+            sendKeyCombo(keyCode: 46, flags: .maskControl) // Ctrl+M fallback if AXPress failed
         }
     }
 
-    let deadline = Date().addingTimeInterval(1.5)
+    let deadline = Date().addingTimeInterval(3.0)
     while Date() < deadline {
-        let state = getComposerState(app, wa)
+        let state = getComposerState(app, axApp, wa)
         if (state["recording_active"] as? Bool) == false {
-            emitJSON([
+            return ([
                 "ok": true,
                 "recording_active": false,
                 "text": state["text"] ?? ""
-            ])
+            ], 0)
         }
-        usleep(100_000)
+        usleep(150_000)
     }
-    emitJSON(["ok": false, "recording_active": true, "error": "dictation_stop_timeout"], exitCode: 1)
+    return (["ok": false, "recording_active": true, "error": "dictation_stop_timeout"], 1)
 }
 
-func cmdSubmit() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let (app, _, _, wa) = activateAntigravity() else { failJSON("antigravity_not_running") }
+func runSubmit() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let (_, axApp, _, wa) = activateAntigravity() else { return failDict("antigravity_not_running") }
 
-    if let sendBtn = findFirst(wa, maxNodes: 3000, where: {
-        guard axString($0, kAXRoleAttribute) == "AXButton" else { return false }
-        let d = axString($0, kAXDescriptionAttribute).lowercased()
-        let t = axString($0, kAXTitleAttribute).lowercased()
-        let enabled = axBool($0, kAXEnabledAttribute) ?? true
-        return enabled && (d == "send message" || d == "send" || t == "send" || d.contains("send prompt"))
-    }) {
+    let initialHandles = getComposerHandles(axApp, wa)
+    if let sendBtn = initialHandles.sendBtn {
         _ = axPress(sendBtn)
-    } else if let mi = findFirst(wa, maxNodes: 3000, where: {
-        axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
-    }) {
+    } else if let mi = initialHandles.msgInput {
         _ = AXUIElementSetAttributeValue(mi, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         usleep(50_000)
         sendKeyCombo(keyCode: 36, flags: []) // Return
     } else {
-        failJSON("composer_not_found")
+        return failDict("composer_not_found")
     }
 
-    let deadline = Date().addingTimeInterval(1.5)
+    let deadline = Date().addingTimeInterval(3.0)
     var remaining = ""
     while Date() < deadline {
-        let state = getComposerState(app, wa)
-        remaining = (state["text"] as? String) ?? ""
-        let stopBtn = findFirst(wa, maxNodes: 2000) {
-            axString($0, kAXRoleAttribute) == "AXButton" && axString($0, kAXDescriptionAttribute).lowercased().contains("stop")
-        }
-        if remaining.isEmpty || stopBtn != nil {
-            emitJSON([
+        let h = getComposerHandles(axApp, wa)
+        remaining = h.msgInput.map { collectText($0) } ?? ""
+        if remaining.isEmpty || (h.sendBtn == nil && h.cancelBtn != nil) {
+            return ([
                 "ok": true,
                 "submitted": true,
                 "remaining_text": remaining
-            ])
+            ], 0)
         }
-        usleep(100_000)
+        usleep(150_000)
     }
-    emitJSON([
+    return ([
         "ok": false,
         "submitted": false,
         "remaining_text": remaining,
         "error": "submit_not_confirmed"
-    ], exitCode: 1)
+    ], 1)
 }
 
-func cmdDumpComposer() -> Never {
-    guard AXIsProcessTrusted() else { failJSON("ax_not_trusted") }
-    guard let app = findAntigravityApp() else { failJSON("antigravity_not_running") }
+func runDumpComposer() -> ([String: Any], Int32) {
+    guard AXIsProcessTrusted() else { return failDict("ax_not_trusted") }
+    guard let app = findAntigravityApp() else { return failDict("antigravity_not_running") }
     let axApp = axAppElement(app)
-    guard let pair = findMainWindowAndWebArea(axApp) else { failJSON("no_webarea") }
+    guard let pair = findMainWindowAndWebArea(axApp) else { return failDict("no_webarea") }
     let wa = pair.webArea
 
     var items: [[String: String]] = []
-    if let mi = findFirst(wa, maxNodes: 3000, where: {
-        axString($0, kAXRoleAttribute) == "AXTextArea" && axString($0, kAXDescriptionAttribute) == "Message input"
-    }) {
+    if let mi = findMessageInput(axApp, wa) {
         var ancestor: AXUIElement? = mi
         for _ in 1...4 {
             if let p = ancestor.flatMap(axParent) { ancestor = p }
@@ -832,7 +1039,7 @@ func cmdDumpComposer() -> Never {
             }
         }
     }
-    emitJSON(["ok": true, "composer_elements": items])
+    return (["ok": true, "composer_elements": items], 0)
 }
 
 // MARK: - Carbon Global Hotkey Support
@@ -918,18 +1125,18 @@ func emitLineJSON(_ dict: [String: Any]) {
 var activeHotKeyRef: EventHotKeyRef?
 var activeNormalizedHotkey: String = ""
 
-func cmdValidateHotkey(_ combo: String) -> Never {
+func runValidateHotkey(_ combo: String) -> ([String: Any], Int32) {
     guard let parsed = parseHotkey(combo) else {
-        failJSON("invalid_hotkey", extra: ["hotkey": combo])
+        return failDict("invalid_hotkey", extra: ["hotkey": combo])
     }
     var ref: EventHotKeyRef?
     let hotKeyID = EventHotKeyID(signature: OSType(0x56574B59), id: 1)
     let status = RegisterEventHotKey(parsed.keyCode, parsed.modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
     if status == noErr, let ref = ref {
         UnregisterEventHotKey(ref)
-        emitJSON(["ok": true, "hotkey": parsed.normalized])
+        return (["ok": true, "hotkey": parsed.normalized], 0)
     }
-    failJSON("register_failed", extra: ["hotkey": parsed.normalized, "status": Int(status)])
+    return failDict("register_failed", extra: ["hotkey": parsed.normalized, "status": Int(status)])
 }
 
 func cmdWatchHotkey(_ combo: String) -> Never {
@@ -985,45 +1192,84 @@ func cmdWatchHotkey(_ combo: String) -> Never {
     exit(0)
 }
 
-// MARK: - CLI Dispatch
+// MARK: - Persistent Stdio Worker & CLI Dispatch
 
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    failJSON("usage: agy-ax-helper <check|activate|prepare-code-orchestrator|inspect-composer|start-dictation|stop-dictation|submit|dump-composer|validate-hotkey|watch-hotkey>")
-}
-
-func argValue(_ flag: String, defaultVal: String) -> String {
-    if let idx = args.firstIndex(of: flag), idx + 1 < args.count {
-        return args[idx + 1]
+func argValue(in argv: [String], _ flag: String, defaultVal: String) -> String {
+    if let idx = argv.firstIndex(of: flag), idx + 1 < argv.count {
+        return argv[idx + 1]
     }
     return defaultVal
 }
 
+func dispatchCommand(_ argv: [String]) -> ([String: Any], Int32) {
+    guard let cmd = argv.first else {
+        return failDict("missing_command")
+    }
+    switch cmd {
+    case "builtin-mic":
+        return runBuiltInMic()
+    case "check":
+        return runCheck()
+    case "activate":
+        return runActivate()
+    case "prepare-code-orchestrator":
+        return runPrepare(
+            project: argValue(in: argv, "--project", defaultVal: "Code"),
+            modelKeyword: argValue(in: argv, "--model", defaultVal: "Orchestrator"),
+            effort: argValue(in: argv, "--effort", defaultVal: "")
+        )
+    case "inspect-composer":
+        return runInspectComposer()
+    case "start-dictation":
+        return runStartDictation()
+    case "stop-dictation":
+        return runStopDictation()
+    case "submit":
+        return runSubmit()
+    case "dump-composer":
+        return runDumpComposer()
+    case "validate-hotkey":
+        return runValidateHotkey(argValue(in: argv, "--hotkey", defaultVal: ""))
+    default:
+        return failDict("unknown_command: \(cmd)")
+    }
+}
+
+func cmdServe() -> Never {
+    emitLineJSON(["ok": true, "event": "helper_ready"])
+    while let line = readLine(strippingNewline: true) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { continue }
+        guard let data = trimmed.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cmdArgs = obj["args"] as? [String], !cmdArgs.isEmpty else {
+            emitLineJSON(["ok": false, "error": "invalid_request"])
+            continue
+        }
+        if cmdArgs[0] == "quit" {
+            emitLineJSON(["ok": true, "event": "helper_bye"])
+            exit(0)
+        }
+        let (result, _) = autoreleasepool {
+            dispatchCommand(cmdArgs)
+        }
+        emitLineJSON(result)
+    }
+    exit(0)
+}
+
+let args = CommandLine.arguments
+guard args.count >= 2 else {
+    failJSON("usage: agy-ax-helper <builtin-mic|check|activate|prepare-code-orchestrator|inspect-composer|start-dictation|stop-dictation|submit|dump-composer|validate-hotkey|watch-hotkey|serve>")
+}
+
+let subArgs = Array(args.dropFirst())
 switch args[1] {
-case "check":
-    cmdCheck()
-case "activate":
-    cmdActivate()
-case "prepare-code-orchestrator":
-    cmdPrepare(
-        project: argValue("--project", defaultVal: "Code"),
-        modelKeyword: argValue("--model", defaultVal: "Orchestrator"),
-        effort: argValue("--effort", defaultVal: "")
-    )
-case "inspect-composer":
-    cmdInspectComposer()
-case "start-dictation":
-    cmdStartDictation()
-case "stop-dictation":
-    cmdStopDictation()
-case "submit":
-    cmdSubmit()
-case "dump-composer":
-    cmdDumpComposer()
-case "validate-hotkey":
-    cmdValidateHotkey(argValue("--hotkey", defaultVal: ""))
+case "serve":
+    cmdServe()
 case "watch-hotkey":
-    cmdWatchHotkey(argValue("--hotkey", defaultVal: ""))
+    cmdWatchHotkey(argValue(in: subArgs, "--hotkey", defaultVal: ""))
 default:
-    failJSON("unknown_command: \(args[1])")
+    let (res, code) = dispatchCommand(subArgs)
+    emitJSON(res, exitCode: code)
 }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import collections
 import dataclasses
@@ -12,6 +13,7 @@ import json
 import os
 import queue
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -431,6 +433,11 @@ def detect_keyword_on_segment(spotter: sherpa_onnx.KeywordSpotter, samples: np.n
     return ""
 
 
+_VAD_LOCK = threading.Lock()
+_WAKE_VAD: sherpa_onnx.VoiceActivityDetector | None = None
+_DICTATION_VAD: sherpa_onnx.VoiceActivityDetector | None = None
+
+
 def build_vad() -> sherpa_onnx.VoiceActivityDetector:
     if not SILERO_VAD_PATH.is_file():
         raise FileNotFoundError(f"Missing Silero VAD model: {SILERO_VAD_PATH}")
@@ -443,6 +450,26 @@ def build_vad() -> sherpa_onnx.VoiceActivityDetector:
     vad_cfg.num_threads = 1
     vad_cfg.provider = "cpu"
     return sherpa_onnx.VoiceActivityDetector(vad_cfg, buffer_size_in_seconds=30)
+
+
+def get_wake_vad() -> sherpa_onnx.VoiceActivityDetector:
+    global _WAKE_VAD
+    with _VAD_LOCK:
+        if _WAKE_VAD is None:
+            _WAKE_VAD = build_wake_vad()
+        else:
+            _WAKE_VAD.reset()
+        return _WAKE_VAD
+
+
+def get_dictation_vad() -> sherpa_onnx.VoiceActivityDetector:
+    global _DICTATION_VAD
+    with _VAD_LOCK:
+        if _DICTATION_VAD is None:
+            _DICTATION_VAD = build_vad()
+        else:
+            _DICTATION_VAD.reset()
+        return _DICTATION_VAD
 
 
 class VoiceSampleMatcher:
@@ -464,9 +491,14 @@ class VoiceSampleMatcher:
         model_path = next((p for p in qint8_candidates if p.is_file()), None)
         if model_path is None:
             raise FileNotFoundError(f"Missing EfficientWord-Net qint8 ONNX model in {qint8_candidates}")
+        sess_opts = ort.SessionOptions()
+        sess_opts.intra_op_num_threads = 1
+        sess_opts.inter_op_num_threads = 1
+        sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         self._sess = ort.InferenceSession(
             str(model_path),
-            sess_options=ort.SessionOptions(),
+            sess_options=sess_opts,
             providers=["CPUExecutionProvider"],
         )
         self._input_name = self._sess.get_inputs()[0].name
@@ -712,34 +744,156 @@ class SingleInstanceLock:
             self._handle = None
 
 
+_READONLY_HELPER_CMDS = frozenset(
+    {"builtin-mic", "check", "inspect-composer", "dump-composer", "validate-hotkey"}
+)
+
+
+class AxHelperClient:
+    """Persistent stdio client for `agy-ax-helper serve` to avoid process-spawn overhead."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._buf = bytearray()
+
+    def _close_locked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._buf = bytearray()
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _read_line_locked(self, timeout: float) -> tuple[str | None, bool]:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return None, False
+        fd = proc.stdout.fileno()
+        deadline = time.monotonic() + max(0.05, timeout)
+        while True:
+            nl_idx = self._buf.find(b"\n")
+            if nl_idx >= 0:
+                raw_line = bytes(self._buf[:nl_idx])
+                del self._buf[: nl_idx + 1]
+                return raw_line.decode("utf-8", errors="replace").strip(), False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, True
+            try:
+                readable, _, _ = select.select([fd], [], [], remaining)
+            except (OSError, ValueError):
+                return None, False
+            if not readable:
+                return None, True
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                return None, False
+            if not chunk:
+                return None, False
+            self._buf.extend(chunk)
+
+    def _ensure_started_locked(self, startup_timeout: float) -> bool:
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        self._close_locked()
+        try:
+            self._proc = subprocess.Popen(
+                [str(AX_HELPER_BIN), "serve"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except OSError:
+            self._proc = None
+            return False
+        ready_line, timed_out = self._read_line_locked(startup_timeout)
+        if timed_out or not ready_line:
+            self._close_locked()
+            return False
+        try:
+            ready = json.loads(ready_line)
+        except json.JSONDecodeError:
+            self._close_locked()
+            return False
+        if ready.get("event") != "helper_ready":
+            self._close_locked()
+            return False
+        return True
+
+    def call(self, args: list[str], timeout: float = 10.0) -> dict[str, Any]:
+        if not args:
+            return {"ok": False, "error": "missing_helper_args"}
+        cmd = args[0]
+        attempts = 2 if cmd in _READONLY_HELPER_CMDS else 1
+        with self._lock:
+            for attempt in range(attempts):
+                if not self._ensure_started_locked(max(timeout, 8.0)):
+                    return {"ok": False, "error": "helper_start_failed", "args": list(args)}
+                proc = self._proc
+                if proc is None or proc.stdin is None:
+                    self._close_locked()
+                    continue
+                payload = (json.dumps({"args": list(args)}, ensure_ascii=False) + "\n").encode("utf-8")
+                try:
+                    os.write(proc.stdin.fileno(), payload)
+                except OSError:
+                    self._close_locked()
+                    if attempt + 1 < attempts:
+                        continue
+                    return {"ok": False, "error": "helper_write_failed", "args": list(args)}
+
+                line, timed_out = self._read_line_locked(timeout)
+                if timed_out:
+                    self._close_locked()
+                    return {"ok": False, "error": "helper_timeout", "args": list(args)}
+                if not line:
+                    self._close_locked()
+                    if attempt + 1 < attempts:
+                        continue
+                    return {"ok": False, "error": "helper_eof", "args": list(args)}
+                try:
+                    data = json.loads(line)
+                    if isinstance(data, dict):
+                        return data
+                except json.JSONDecodeError:
+                    pass
+                return {"ok": False, "error": "invalid_helper_output", "stdout": line, "args": list(args)}
+        return {"ok": False, "error": "helper_failed", "args": list(args)}
+
+
+_AX_HELPER_CLIENT = AxHelperClient()
+atexit.register(_AX_HELPER_CLIENT.close)
+
+
 def run_ax_helper(*args: str, timeout: float = 10.0) -> dict[str, Any]:
     if not AX_HELPER_BIN.is_file():
         return {"ok": False, "error": f"helper_missing:{AX_HELPER_BIN}"}
-    try:
-        proc = subprocess.run(
-            [str(AX_HELPER_BIN), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "helper_timeout", "args": list(args)}
-    out = proc.stdout.strip()
-    if out:
-        try:
-            data = json.loads(out.splitlines()[-1])
-            data.setdefault("ok", proc.returncode == 0)
-            return data
-        except json.JSONDecodeError:
-            pass
-    return {
-        "ok": False,
-        "error": "invalid_helper_output",
-        "returncode": proc.returncode,
-        "stdout": out,
-        "stderr": proc.stderr.strip(),
-    }
+    return _AX_HELPER_CLIENT.call(list(args), timeout=timeout)
 
 
 def play_sound(sound_path: str, volume: float, wait: bool = True) -> None:
@@ -771,7 +925,7 @@ def list_input_mics(builtin_name: str | None = None) -> list[dict[str, Any]]:
     devices = sd.query_devices()
     default_in = get_default_input_index()
     if builtin_name is None:
-        ax_info = run_ax_helper("check", timeout=4.0)
+        ax_info = run_ax_helper("builtin-mic", timeout=3.0)
         resolved_builtin = str(ax_info.get("builtin_mic_name", "")).strip()
     else:
         resolved_builtin = str(builtin_name).strip()
@@ -810,7 +964,7 @@ def resolve_input_device(mic_mode: str) -> tuple[int | None, str]:
         return None, "default"
 
     if mic_mode == "built-in":
-        ax_info = run_ax_helper("check", timeout=4.0)
+        ax_info = run_ax_helper("builtin-mic", timeout=3.0)
         builtin_name = str(ax_info.get("builtin_mic_name", "")).strip()
         if builtin_name:
             for idx, dev in input_devices:
@@ -835,6 +989,7 @@ def resolve_input_device(mic_mode: str) -> tuple[int | None, str]:
 class RuntimeState:
     def __init__(self, config_path: Path, cfg: WakeConfig) -> None:
         self.lock = threading.Lock()
+        self._probe_lock = threading.Lock()
         self.config_path = config_path
         self.cfg = cfg
         self.state = "initializing"
@@ -1022,8 +1177,8 @@ def monitor_dictation_and_submit(
     runtime: RuntimeState | None = None,
     dry_run_submit: bool = False,
 ) -> dict[str, Any]:
-    vad = build_vad()
-    audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
+    vad = get_dictation_vad()
+    audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
 
     def callback(indata: np.ndarray, frames: int, timing: object, status: object) -> None:
         del frames, timing, status
@@ -1038,70 +1193,117 @@ def monitor_dictation_and_submit(
             audio_q.put_nowait(samples)
 
     start_ts = time.monotonic()
-    last_activity_ts = start_ts
-    last_poll_ts = 0.0
-    speech_started = False
-    last_text = ""
+    last_vad_ts = start_ts
+    speech_started_vad = False
     reason = "unknown"
 
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        blocksize=512,
-        device=device_idx,
-        callback=callback,
-    ):
-        while True:
+    comp_lock = threading.Lock()
+    poll_stop = threading.Event()
+    comp_state: dict[str, Any] = {
+        "text": "",
+        "last_change_ts": start_ts,
+        "speech_started": False,
+        "stopped_externally": False,
+    }
+
+    def composer_poller() -> None:
+        inactive_streak = 0
+        while not poll_stop.wait(0.45):
             if runtime is not None and runtime.stop_event.is_set():
-                reason = "daemon_stopping"
-                break
-            now = time.monotonic()
-            elapsed = now - start_ts
+                return
+            comp = run_ax_helper("inspect-composer", timeout=5.0)
+            if not comp.get("ok"):
+                continue
+            now_p = time.monotonic()
+            cur_text = str(comp.get("text", ""))
+            rec_active = bool(comp.get("recording_active", True))
+            msg_found = bool(comp.get("message_input_found", False))
+            with comp_lock:
+                if cur_text.strip():
+                    comp_state["speech_started"] = True
+                if cur_text != comp_state["text"]:
+                    comp_state["text"] = cur_text
+                    comp_state["last_change_ts"] = now_p
+            if rec_active:
+                inactive_streak = 0
+            elif msg_found and (now_p - start_ts) > 2.0:
+                inactive_streak += 1
+                if inactive_streak >= 2:
+                    with comp_lock:
+                        comp_state["stopped_externally"] = True
+                    return
 
+    poller_thread = threading.Thread(
+        target=composer_poller, daemon=True, name="voice-wake-composer-poller"
+    )
+    poller_thread.start()
+
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            blocksize=1024,
+            latency="high",
+            device=device_idx,
+            callback=callback,
+        ):
             while True:
-                try:
-                    chunk = audio_q.get_nowait()
-                except queue.Empty:
+                if runtime is not None and runtime.stop_event.is_set():
+                    reason = "daemon_stopping"
                     break
-                vad.accept_waveform(chunk)
-                while not vad.empty():
-                    vad.pop()
-                    speech_started = True
-                    last_activity_ts = time.monotonic()
-                if vad.is_speech_detected():
-                    speech_started = True
-                    last_activity_ts = time.monotonic()
 
-            if now - last_poll_ts >= 0.25:
-                last_poll_ts = now
-                comp = run_ax_helper("inspect-composer", timeout=3.0)
-                if comp.get("ok"):
-                    cur_text = str(comp.get("text", ""))
-                    rec_active = bool(comp.get("recording_active", True))
-                    if cur_text.strip():
-                        speech_started = True
-                    if cur_text != last_text:
-                        last_text = cur_text
-                        last_activity_ts = now
-                    if not rec_active and elapsed > 1.5:
-                        reason = "dictation_stopped_externally"
+                # Drain audio queue first; never block VAD loop on AX polling.
+                while True:
+                    try:
+                        chunk = audio_q.get_nowait()
+                    except queue.Empty:
                         break
+                    for offset in range(0, len(chunk), 512):
+                        sub = chunk[offset : offset + 512]
+                        if len(sub) < 512:
+                            sub = np.pad(sub, (0, 512 - len(sub)))
+                        vad.accept_waveform(sub)
+                        while not vad.empty():
+                            vad.pop()
+                            speech_started_vad = True
+                            last_vad_ts = time.monotonic()
+                        if vad.is_speech_detected():
+                            speech_started_vad = True
+                            last_vad_ts = time.monotonic()
 
-            now = time.monotonic()
-            if not speech_started and (now - start_ts) >= cfg.wait_for_speech_timeout_sec:
-                reason = "wait_for_speech_timeout"
-                break
-            if speech_started and (now - last_activity_ts) >= cfg.silence_timeout_sec:
-                reason = "silence_pause"
-                break
-            if (now - start_ts) >= cfg.max_dictation_sec:
-                reason = "max_dictation_timeout"
-                break
+                with comp_lock:
+                    comp_speech = bool(comp_state["speech_started"])
+                    comp_change_ts = float(comp_state["last_change_ts"])
+                    stopped_ext = bool(comp_state["stopped_externally"])
 
-            time.sleep(0.04)
+                now = time.monotonic()
+                if stopped_ext:
+                    reason = "dictation_stopped_externally"
+                    break
 
-    stop_res = run_ax_helper("stop-dictation", timeout=5.0)
+                speech_started = speech_started_vad or comp_speech
+                effective_last_activity = max(last_vad_ts, comp_change_ts)
+
+                if not speech_started and (now - start_ts) >= cfg.wait_for_speech_timeout_sec:
+                    reason = "wait_for_speech_timeout"
+                    break
+                if speech_started and (now - effective_last_activity) >= cfg.silence_timeout_sec:
+                    reason = "silence_pause"
+                    break
+                if (now - start_ts) >= cfg.max_dictation_sec:
+                    reason = "max_dictation_timeout"
+                    break
+
+                time.sleep(0.03)
+    finally:
+        poll_stop.set()
+        poller_thread.join(timeout=1.0)
+
+    with comp_lock:
+        last_text = str(comp_state["text"])
+
+    stop_res = run_ax_helper("stop-dictation", timeout=8.0)
     if reason in ("wait_for_speech_timeout", "daemon_stopping"):
         play_sound(cfg.sounds.cancel, cfg.sounds.volume, wait=False)
         return {"ok": False, "reason": reason, "stop_res": stop_res, "submitted": False, "text": ""}
@@ -1109,11 +1311,12 @@ def monitor_dictation_and_submit(
     if runtime is not None:
         runtime.set_state("submitting")
 
-    settle_deadline = time.monotonic() + 1.5
+    settle_deadline = time.monotonic() + 2.5
     stable_since = time.monotonic()
-    final_text = last_text
+    stop_text = str(stop_res.get("text", "") or "")
+    final_text = stop_text if len(stop_text) >= len(last_text) else last_text
     while time.monotonic() < settle_deadline:
-        comp = run_ax_helper("inspect-composer", timeout=3.0)
+        comp = run_ax_helper("inspect-composer", timeout=5.0)
         if comp.get("ok"):
             cur_text = str(comp.get("text", ""))
             if cur_text != final_text:
@@ -1131,7 +1334,7 @@ def monitor_dictation_and_submit(
     if dry_run_submit:
         return {"ok": True, "reason": reason, "submitted": False, "dry_run": True, "text": clean_text}
 
-    submit_res = run_ax_helper("submit", timeout=5.0)
+    submit_res = run_ax_helper("submit", timeout=8.0)
     if submit_res.get("ok"):
         play_sound(cfg.sounds.submit, cfg.sounds.volume, wait=False)
     else:
@@ -1168,16 +1371,16 @@ def handle_wake_handoff(
         cfg.model_keyword,
         "--effort",
         cfg.thinking_effort,
-        timeout=8.0,
+        timeout=15.0,
     )
     emit("prepare_result", **prep)
     if not prep.get("ok"):
         play_sound(cfg.sounds.cancel, cfg.sounds.volume, wait=False)
         return {"ok": False, "stage": "prepare", "detail": prep}
 
-    play_sound(cfg.sounds.ready, cfg.sounds.volume, wait=True)
+    play_sound(cfg.sounds.ready, cfg.sounds.volume, wait=False)
 
-    start_res = run_ax_helper("start-dictation", timeout=5.0)
+    start_res = run_ax_helper("start-dictation", timeout=10.0)
     emit("start_dictation_result", **start_res)
     if not start_res.get("ok"):
         play_sound(cfg.sounds.cancel, cfg.sounds.volume, wait=False)
@@ -1196,8 +1399,10 @@ def listen_for_wake_word(
     runtime: RuntimeState,
     cfg: WakeConfig,
 ) -> str | None:
-    audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=128)
-    vad = build_wake_vad()
+    audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
+    status_events: collections.deque[str] = collections.deque(maxlen=4)
+    last_audio_status_log = 0.0
+    vad = get_wake_vad()
     use_sample_mode = cfg.wake_mode == "voice_sample"
     matcher = get_sample_matcher() if use_sample_mode else None
     is_single_word = len(cfg.wake_phrase.split()) <= 1
@@ -1209,7 +1414,7 @@ def listen_for_wake_word(
     def callback(indata: np.ndarray, frames: int, timing: object, status: object) -> None:
         del frames, timing
         if status:
-            runtime.log("audio_status", stage="kws", detail=str(status))
+            status_events.append(str(status))
         samples = indata[:, 0].copy()
         try:
             audio_q.put_nowait(samples)
@@ -1256,7 +1461,8 @@ def listen_for_wake_word(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
-            blocksize=512,
+            blocksize=1024,
+            latency="high",
             device=device_idx,
             callback=callback,
         ):
@@ -1268,13 +1474,26 @@ def listen_for_wake_word(
                     or runtime.recording_sample_event.is_set()
                 ):
                     return None
+                if status_events:
+                    detail = status_events.popleft()
+                    status_events.clear()
+                    now_st = time.monotonic()
+                    if now_st - last_audio_status_log >= 5.0:
+                        last_audio_status_log = now_st
+                        runtime.log("audio_status", stage="kws", detail=detail)
                 try:
                     samples = audio_q.get(timeout=0.08)
                 except queue.Empty:
                     continue
 
-                vad.accept_waveform(samples)
-                speaking = vad.is_speech_detected()
+                speaking = False
+                for offset in range(0, len(samples), 512):
+                    sub = samples[offset : offset + 512]
+                    if len(sub) < 512:
+                        sub = np.pad(sub, (0, 512 - len(sub)))
+                    vad.accept_waveform(sub)
+                    if vad.is_speech_detected():
+                        speaking = True
 
                 # Low-latency streaming fast path for multi-word text KWS phrases
                 if live_stream is not None and spotter is not None:
@@ -1296,7 +1515,7 @@ def listen_for_wake_word(
                         silence_chunks = 0
                     elif was_speaking:
                         silence_chunks += 1
-                        if silence_chunks >= 10:
+                        if silence_chunks >= 5:
                             live_stream = spotter.create_stream()
                             was_speaking = False
                             silence_chunks = 0
@@ -1361,8 +1580,9 @@ def listen_for_wake_word(
     return None
 
 
-def run_doctor_check(cfg: WakeConfig) -> dict[str, Any]:
+def run_doctor_check(cfg: WakeConfig, runtime: RuntimeState | None = None) -> dict[str, Any]:
     ax_res = run_ax_helper("check", timeout=8.0)
+    builtin_name = str(ax_res.get("builtin_mic_name", "")).strip() or None
     dev_idx, dev_name = resolve_input_device(cfg.mic_mode)
 
     rms = 0.0
@@ -1386,13 +1606,24 @@ def run_doctor_check(cfg: WakeConfig) -> dict[str, Any]:
     vad_ok = False
     model_error = ""
     try:
-        _ = build_keyword_spotter(cfg)
-        kws_ok = True
-        _ = build_vad()
-        vad_ok = True
+        if cfg.wake_mode == "voice_sample":
+            _ = get_sample_matcher()
+            kws_ok = True
+        else:
+            existing_spotter = runtime.spotter if runtime is not None else None
+            if existing_spotter is None:
+                _ = build_keyword_spotter(cfg)
+            kws_ok = True
+        if SILERO_VAD_PATH.is_file():
+            if _DICTATION_VAD is not None or _WAKE_VAD is not None:
+                vad_ok = True
+            else:
+                _ = build_vad()
+                vad_ok = True
     except Exception as exc:  # noqa: BLE001
         model_error = str(exc)
 
+    del builtin_name
     overall = bool(ax_res.get("ok")) and mic_ok and kws_ok and vad_ok
     return {
         "ok": overall,
@@ -1478,6 +1709,7 @@ def apply_config_update(runtime: RuntimeState, patch: dict[str, Any]) -> tuple[W
 
     kw_path = Path(cur_dict["keywords_file"])
     kw_line = ""
+    target_mode = str(cur_dict.get("wake_mode", "text"))
     need_kws_rebuild = (
         cur_dict["wake_phrase"] != cur.wake_phrase
         or tuple(cur_dict.get("wake_aliases", [])) != cur.wake_aliases
@@ -1485,7 +1717,7 @@ def apply_config_update(runtime: RuntimeState, patch: dict[str, Any]) -> tuple[W
         or float(cur_dict["keywords_threshold"]) != cur.keywords_threshold
         or not kw_path.is_file()
     )
-    if need_kws_rebuild:
+    if target_mode == "text" and need_kws_rebuild:
         kw_line = generate_keywords_file(
             cur_dict["wake_phrase"],
             float(cur_dict["keywords_score"]),
@@ -1497,8 +1729,11 @@ def apply_config_update(runtime: RuntimeState, patch: dict[str, Any]) -> tuple[W
 
     atomic_write_text(runtime.config_path, json.dumps(cur_dict, ensure_ascii=False, indent=2) + "\n")
     new_cfg = load_config(runtime.config_path)
-    new_spotter = build_keyword_spotter(new_cfg)
-    if new_cfg.wake_mode == "voice_sample":
+    new_spotter = runtime.spotter
+    if new_cfg.wake_mode == "text":
+        if need_kws_rebuild or new_spotter is None:
+            new_spotter = build_keyword_spotter(new_cfg)
+    else:
         _ = get_sample_matcher()
     with runtime.lock:
         runtime.cfg = new_cfg
@@ -1529,38 +1764,53 @@ def apply_config_update(runtime: RuntimeState, patch: dict[str, Any]) -> tuple[W
 
 
 def get_cached_probes(
-    runtime: RuntimeState, force: bool = False, ttl: float = 15.0
+    runtime: RuntimeState, force: bool = False, ttl: float = 60.0
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
-    """Return cached AX status, mics, and projects; refresh outside runtime.lock when expired."""
+    """Return cached AX status, mics, and projects; serialize refreshes and skip AX probes during busy handoffs."""
     now = time.monotonic()
     with runtime.lock:
+        busy = runtime.state in ("preparing", "dictating", "submitting", "recording_sample")
         ax_status = runtime.cached_ax_status
-        ax_fresh = bool(ax_status) and (now - runtime.cached_ax_ts) < ttl and not force
+        ax_fresh = bool(ax_status) and not force and (busy or (now - runtime.cached_ax_ts) < ttl)
         mics = runtime.cached_mics
-        mics_fresh = bool(mics) and (now - runtime.cached_mics_ts) < ttl and not force
+        mics_fresh = bool(mics) and not force and (busy or (now - runtime.cached_mics_ts) < ttl)
         projects = runtime.cached_projects
-        projects_fresh = bool(projects) and (now - runtime.cached_projects_ts) < ttl and not force
+        projects_fresh = bool(projects) and not force and (busy or (now - runtime.cached_projects_ts) < ttl)
 
-    if not ax_fresh:
-        ax_status = run_ax_helper("check", timeout=4.0)
+    if ax_fresh and mics_fresh and projects_fresh:
+        return ax_status, mics, projects
+
+    with runtime._probe_lock:
+        now = time.monotonic()
         with runtime.lock:
-            runtime.cached_ax_status = ax_status
-            runtime.cached_ax_ts = time.monotonic()
+            busy = runtime.state in ("preparing", "dictating", "submitting", "recording_sample")
+            ax_status = runtime.cached_ax_status
+            ax_fresh = bool(ax_status) and not force and (busy or (now - runtime.cached_ax_ts) < ttl)
+            mics = runtime.cached_mics
+            mics_fresh = bool(mics) and not force and (busy or (now - runtime.cached_mics_ts) < ttl)
+            projects = runtime.cached_projects
+            projects_fresh = bool(projects) and not force and (busy or (now - runtime.cached_projects_ts) < ttl)
 
-    if not mics_fresh:
-        builtin_name = str(ax_status.get("builtin_mic_name", "")).strip()
-        mics = list_input_mics(builtin_name=builtin_name)
-        with runtime.lock:
-            runtime.cached_mics = mics
-            runtime.cached_mics_ts = time.monotonic()
+        if not ax_fresh:
+            ax_status = run_ax_helper("check", timeout=4.0)
+            with runtime.lock:
+                runtime.cached_ax_status = ax_status
+                runtime.cached_ax_ts = time.monotonic()
 
-    if not projects_fresh:
-        projects = list_projects()
-        with runtime.lock:
-            runtime.cached_projects = projects
-            runtime.cached_projects_ts = time.monotonic()
+        if not mics_fresh:
+            builtin_name = str(ax_status.get("builtin_mic_name", "")).strip()
+            mics = list_input_mics(builtin_name=builtin_name)
+            with runtime.lock:
+                runtime.cached_mics = mics
+                runtime.cached_mics_ts = time.monotonic()
 
-    return ax_status, mics, projects
+        if not projects_fresh:
+            projects = list_projects()
+            with runtime.lock:
+                runtime.cached_projects = projects
+                runtime.cached_projects_ts = time.monotonic()
+
+        return ax_status, mics, projects
 
 
 def start_web_server(runtime: RuntimeState, port: int, ui_token: str) -> ThreadingHTTPServer:
@@ -1649,7 +1899,7 @@ def start_web_server(runtime: RuntimeState, port: int, ui_token: str) -> Threadi
                         "last_event": runtime.last_event,
                         "config": cfg.to_dict(),
                     }
-                ax_status, mics, projects = get_cached_probes(runtime, force=force_refresh, ttl=15.0)
+                ax_status, mics, projects = get_cached_probes(runtime, force=force_refresh, ttl=60.0)
                 st["ax_status"] = ax_status
                 st["available_mics"] = mics
                 st["available_projects"] = projects
@@ -1802,7 +2052,7 @@ def start_web_server(runtime: RuntimeState, port: int, ui_token: str) -> Threadi
             if parsed.path == "/api/check":
                 with runtime.lock:
                     cfg = runtime.cfg
-                report = run_doctor_check(cfg)
+                report = run_doctor_check(cfg, runtime=runtime)
                 with runtime.lock:
                     if isinstance(report.get("ax"), dict):
                         runtime.cached_ax_status = report["ax"]
@@ -2062,11 +2312,18 @@ def cmd_daemon(
         web_server = start_web_server(runtime, port, ui_token)
 
     try:
-        runtime.spotter = build_keyword_spotter(cfg)
-        if cfg.wake_mode == "voice_sample":
-            _ = get_sample_matcher()
         if runtime.hotkey_watcher is not None:
             runtime.hotkey_watcher.reconfigure(cfg.hotkey_enabled, cfg.hotkey)
+        threading.Thread(
+            target=lambda: run_ax_helper("builtin-mic", timeout=8.0),
+            daemon=True,
+            name="voice-wake-helper-warmup",
+        ).start()
+        if cfg.wake_mode == "text":
+            runtime.spotter = build_keyword_spotter(cfg)
+        else:
+            _ = get_sample_matcher()
+        _ = get_wake_vad()
         runtime.log(
             "daemon_started",
             version=VERSION,
@@ -2125,7 +2382,7 @@ def cmd_daemon(
                 runtime.manual_trigger_event.wait(0.2)
                 continue
 
-            if cur_spotter is None:
+            if cur_cfg.wake_mode == "text" and cur_spotter is None:
                 cur_spotter = build_keyword_spotter(cur_cfg)
                 with runtime.lock:
                     runtime.spotter = cur_spotter
@@ -2174,6 +2431,7 @@ def cmd_daemon(
             runtime.set_state("cooldown")
             time.sleep(cur_cfg.cooldown_sec)
     finally:
+        _AX_HELPER_CLIENT.close()
         if runtime.hotkey_watcher is not None:
             runtime.hotkey_watcher.stop()
         if web_server is not None:
