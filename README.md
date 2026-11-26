@@ -16,6 +16,10 @@
 
 **Voice Wake** (`voice-wake`) runs locally on macOS in the background. Say your wake phrase or press a global hotkey to bring **Antigravity** to the front, open a new conversation in your chosen project, switch to your preferred model & thinking effort, trigger Antigravity's built-in voice dictation, and automatically submit your prompt after you finish speaking.
 
+<p align="center">
+  <img src="assets/panel-preview.png" width="840" alt="Voice Wake Auxiliary Pane preview showing Status, Wake, and Settings tabs" />
+</p>
+
 ## Highlights
 
 - **Dual-Mode 100% Local Wake Detection**

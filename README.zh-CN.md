@@ -16,6 +16,10 @@
 
 **Voice Wake**（`voice-wake`）在 macOS 本地后台持续监听。说出唤醒词或按下全局快捷键后，自动将 **Antigravity** 拉到前台、在指定项目下新建对话、切换目标模型与思考深度、启动内置语音听写，并在你说完停顿后自动结束听写并发送执行。
 
+<p align="center">
+  <img src="assets/panel-preview.png" width="840" alt="Voice Wake 侧边栏控制面板预览（状态 / 唤醒 / 设置）" />
+</p>
+
 ## 核心特性
 
 - **双模式 100% 本地唤醒检测**
